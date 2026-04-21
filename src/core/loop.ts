@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   ContinuationKind,
   DEFAULT_MAX_TOKENS,
+  MAX_COMPACT_RETRIES,
   MAX_RECOVERY_RETRIES,
   type ContinuationSignal,
   type LoopFeedback,
@@ -27,6 +28,8 @@ export async function* queryLoop(
   let hasEscalated = false;
   let recoveryRetries = 0;
   let collapseAttempted = false;
+  let compactRetries = 0;
+  let withheldError: unknown = null;
 
   while (true) {
     // ----- API call -----
@@ -41,27 +44,36 @@ export async function* queryLoop(
         ...(tools?.length && { tools }),
       });
     } catch (err: unknown) {
-      // ---- Prompt-too-long handling (2-stage) ----
+      // ---- Prompt-too-long handling (2-stage, withhold error) ----
       if (isPromptTooLongError(err)) {
+        // Withhold the error — recovery logic may handle it silently.
+        // Only exposed if all recovery stages are exhausted.
+        withheldError = err;
+
         if (!collapseAttempted) {
           // Stage 1: collapse_drain_retry
           collapseAttempted = true;
           const feedback: LoopFeedback = yield {
             kind: ContinuationKind.CollapseDrainRetry,
-            error: err,
           };
           messages = feedback.messages;
           maxTokens = feedback.maxTokens;
           continue;
         }
-        // Stage 2: reactive_compact_retry
-        const feedback: LoopFeedback = yield {
-          kind: ContinuationKind.ReactiveCompactRetry,
-          error: err,
-        };
-        messages = feedback.messages;
-        maxTokens = feedback.maxTokens;
-        continue;
+
+        // Stage 2: reactive_compact_retry (limited retries)
+        if (compactRetries < MAX_COMPACT_RETRIES) {
+          compactRetries++;
+          const feedback: LoopFeedback = yield {
+            kind: ContinuationKind.ReactiveCompactRetry,
+          };
+          messages = feedback.messages;
+          maxTokens = feedback.maxTokens;
+          continue;
+        }
+
+        // Recovery exhausted — expose the withheld error
+        throw withheldError;
       }
 
       // Non-PTL errors propagate to the engine

@@ -85,3 +85,4 @@ export interface QueryLoopParams {
 export const DEFAULT_MAX_TOKENS = 16_384;
 export const ESCALATED_MAX_TOKENS = 65_536;
 export const MAX_RECOVERY_RETRIES = 3;
+export const MAX_COMPACT_RETRIES = 3;

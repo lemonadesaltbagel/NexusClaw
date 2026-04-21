@@ -102,15 +102,33 @@ export class QueryEngine {
 
     // Kick off the generator — first .next() has no argument
     let iter = await gen.next();
+    let withheldError: unknown = null;
 
     while (!iter.done) {
       const signal: ContinuationSignal = iter.value;
-      const feedback = await this.handleSignal(signal, currentMaxTokens);
-      currentMaxTokens = feedback.maxTokens;
-      iter = await gen.next(feedback);
+
+      // Withhold errors for recoverable signals — the user should not
+      // see transient max_output_tokens / prompt_too_long recovery.
+      // Only expose if recovery ultimately fails.
+      if (isRecoverableSignal(signal.kind)) {
+        withheldError =
+          signal.error ?? new Error(`Recovery in progress: ${signal.kind}`);
+      } else {
+        // Non-recovery signal means prior recovery succeeded silently
+        withheldError = null;
+      }
+
+      try {
+        const feedback = await this.handleSignal(signal, currentMaxTokens);
+        currentMaxTokens = feedback.maxTokens;
+        iter = await gen.next(feedback);
+      } catch (err) {
+        // Recovery exhausted — expose the withheld error
+        throw withheldError ?? err;
+      }
     }
 
-    // Turn complete — persist final messages into session history
+    // Turn complete — recovery succeeded, discard any withheld errors
     const result: QueryResult = iter.value;
     this.messages = result.messages;
     return result;
@@ -274,4 +292,17 @@ export class QueryEngine {
     this.messages = updatedMessages;
     return { messages: updatedMessages, maxTokens };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function isRecoverableSignal(kind: ContinuationKind): boolean {
+  return (
+    kind === ContinuationKind.CollapseDrainRetry ||
+    kind === ContinuationKind.ReactiveCompactRetry ||
+    kind === ContinuationKind.MaxOutputTokensEscalate ||
+    kind === ContinuationKind.MaxOutputTokensRecovery
+  );
 }
