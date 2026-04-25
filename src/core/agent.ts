@@ -30,6 +30,8 @@ export interface AgentOptions {
   collapseContext?: (messages: MessageParam[]) => Promise<MessageParam[]>;
   /** Force a full summary compaction of conversation history. Returns compacted messages. */
   compactMessages?: (messages: MessageParam[]) => Promise<MessageParam[]>;
+  /** Called for each text delta as the response streams in. */
+  onText?: (delta: string) => void;
   /** Stop hook — return true to *block* the turn from completing. */
   checkStopHook?: (response: Message) => Promise<boolean>;
 }
@@ -45,6 +47,7 @@ export class Agent {
   private executeTool: NonNullable<AgentOptions["executeTool"]>;
   private collapseContext: NonNullable<AgentOptions["collapseContext"]>;
   private compactMessages: NonNullable<AgentOptions["compactMessages"]>;
+  private onText: (delta: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
 
   constructor(options: AgentOptions) {
@@ -61,6 +64,7 @@ export class Agent {
       options.collapseContext ?? (async (msgs) => msgs);
     this.compactMessages =
       options.compactMessages ?? (async (msgs) => msgs);
+    this.onText = options.onText ?? (() => {});
     this.checkStopHook = options.checkStopHook;
   }
 
@@ -88,13 +92,17 @@ export class Agent {
       let response: Message;
 
       try {
-        response = await this.client.messages.create({
+        const stream = this.client.messages.stream({
           model: this.model,
           max_tokens: currentMaxTokens,
           messages: this.messages,
           ...(this.system !== undefined && { system: this.system }),
           ...(this.tools?.length && { tools: this.tools }),
         });
+
+        stream.on("text", (delta) => this.onText(delta));
+
+        response = (await stream.finalMessage()) as Message;
       } catch (err: unknown) {
         // ---- Prompt-too-long handling (2-stage, withhold error) ----
         if (isPromptTooLongError(err)) {
@@ -178,28 +186,36 @@ export class Agent {
   // Recovery & continuation handlers
   // -----------------------------------------------------------------------
 
-  /** Execute tools, append assistant message + tool results. */
+  /** Execute tools serially, append assistant message + tool results. */
   private async handleNextTurn(response: Message): Promise<void> {
     const toolBlocks = response.content.filter(
       (b): b is ToolUseBlock => b.type === "tool_use",
     );
 
+    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+
+    for (const block of toolBlocks) {
+      let content: string;
+      try {
+        content = await this.executeTool(
+          block.name,
+          block.input as Record<string, unknown>,
+        );
+      } catch (err) {
+        content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content,
+      });
+    }
+
     this.messages = [
       ...this.messages,
       { role: "assistant", content: response.content },
-      {
-        role: "user",
-        content: await Promise.all(
-          toolBlocks.map(async (block) => ({
-            type: "tool_result" as const,
-            tool_use_id: block.id,
-            content: await this.executeTool(
-              block.name,
-              block.input as Record<string, unknown>,
-            ),
-          })),
-        ),
-      },
+      { role: "user", content: toolResults },
     ];
   }
 
