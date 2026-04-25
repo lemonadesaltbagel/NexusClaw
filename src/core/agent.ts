@@ -49,6 +49,7 @@ export class Agent {
   private compactMessages: NonNullable<AgentOptions["compactMessages"]>;
   private onText: (delta: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
+  private abortController: AbortController | null = null;
 
   constructor(options: AgentOptions) {
     this.client = options.client;
@@ -73,6 +74,21 @@ export class Agent {
     return this.messages;
   }
 
+  /** High-level entry point: runs one full turn with abort support. */
+  async chat(userMessage: string): Promise<void> {
+    this.abortController = new AbortController();
+    try {
+      await this.chatAnthropic(userMessage);
+    } finally {
+      this.abortController = null;
+    }
+  }
+
+  /** Cancel the in-flight turn (streaming API call + tool execution). */
+  abort(): void {
+    this.abortController?.abort();
+  }
+
   // -----------------------------------------------------------------------
   // chatAnthropic — core method driving one full user→assistant turn.
   // -----------------------------------------------------------------------
@@ -92,13 +108,16 @@ export class Agent {
       let response: Message;
 
       try {
-        const stream = this.client.messages.stream({
-          model: this.model,
-          max_tokens: currentMaxTokens,
-          messages: this.messages,
-          ...(this.system !== undefined && { system: this.system }),
-          ...(this.tools?.length && { tools: this.tools }),
-        });
+        const stream = this.client.messages.stream(
+          {
+            model: this.model,
+            max_tokens: currentMaxTokens,
+            messages: this.messages,
+            ...(this.system !== undefined && { system: this.system }),
+            ...(this.tools?.length && { tools: this.tools }),
+          },
+          { signal: this.abortController?.signal },
+        );
 
         stream.on("text", (delta) => this.onText(delta));
 
@@ -195,6 +214,8 @@ export class Agent {
     const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
 
     for (const block of toolBlocks) {
+      if (this.abortController?.signal.aborted) break;
+
       let content: string;
       try {
         content = await this.executeTool(
