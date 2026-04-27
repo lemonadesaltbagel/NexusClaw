@@ -55,7 +55,7 @@ describe("executeTool truncation", () => {
 
     const result = await executeTool("read_file", { file_path: filePath });
     expect(result.length).toBeLessThanOrEqual(60_000); // truncated
-    expect(result).toContain("[Truncated");
+    expect(result).toContain("[... truncated");
     teardown();
   });
 

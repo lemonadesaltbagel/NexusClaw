@@ -14,9 +14,11 @@ const MAX_RESULT_CHARS = 50_000;
 
 function truncateResult(result: string): string {
   if (result.length <= MAX_RESULT_CHARS) return result;
+  const keepEach = Math.floor((MAX_RESULT_CHARS - 60) / 2);
   return (
-    result.slice(0, MAX_RESULT_CHARS) +
-    `\n\n[Truncated: result exceeded ${MAX_RESULT_CHARS} characters]`
+    result.slice(0, keepEach) +
+    "\n\n[... truncated " + (result.length - keepEach * 2) + " chars ...]\n\n" +
+    result.slice(-keepEach)
   );
 }
 
