@@ -34,6 +34,24 @@ describe("executeTool routing", () => {
     teardown();
   });
 
+  test("routes grep_search to grepSearch handler", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "searchme.txt");
+    writeFileSync(filePath, "findthis line\nother line");
+
+    const result = await executeTool("grep_search", {
+      pattern: "findthis",
+      path: TEST_DIR,
+    });
+    expect(result).toContain("findthis line");
+    teardown();
+  });
+
+  test("routes run_shell to runShell handler", async () => {
+    const result = await executeTool("run_shell", { command: "echo routed" });
+    expect(result.trim()).toBe("routed");
+  });
+
   test("returns unknown tool message for unregistered names", async () => {
     const result = await executeTool("nonexistent_tool", {});
     expect(result).toContain("Unknown tool");
@@ -59,13 +77,29 @@ describe("executeTool truncation", () => {
     teardown();
   });
 
+  test("preserves both head and tail when truncating", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "headtail.txt");
+    const head = "HEAD_MARKER_" + "a".repeat(100);
+    const tail = "b".repeat(100) + "_TAIL_MARKER";
+    // head + middle + tail exceeds 50K when line-numbered
+    const bigContent = head + "x".repeat(60_000) + tail;
+    writeFileSync(filePath, bigContent);
+
+    const result = await executeTool("read_file", { file_path: filePath });
+    expect(result).toContain("[... truncated");
+    expect(result).toContain("HEAD_MARKER_");
+    expect(result).toContain("_TAIL_MARKER");
+    teardown();
+  });
+
   test("does not truncate results under 50K chars", async () => {
     setup();
     const filePath = join(TEST_DIR, "small.txt");
     writeFileSync(filePath, "small content");
 
     const result = await executeTool("read_file", { file_path: filePath });
-    expect(result).not.toContain("[Truncated");
+    expect(result).not.toContain("[... truncated");
     teardown();
   });
 });
