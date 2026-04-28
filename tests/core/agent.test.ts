@@ -4,6 +4,7 @@ import { Agent } from "@/core/agent";
 import {
   DEFAULT_MAX_TOKENS,
   ESCALATED_MAX_TOKENS,
+  THINKING_MAX_TOKENS,
   MAX_RECOVERY_RETRIES,
   MAX_COMPACT_RETRIES,
   type Message,
@@ -493,7 +494,140 @@ describe("abort controller", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. getMessages — read-only snapshot
+// 9. Thinking mode
+// ---------------------------------------------------------------------------
+
+describe("thinking mode", () => {
+  test("enabled mode sends thinking param and raises max_tokens", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+    let capturedParams: Record<string, unknown> = {};
+    const client = mockClient((params: Record<string, unknown>) => {
+      capturedParams = params;
+      return fakeStream(msg);
+    });
+
+    const agent = new Agent({ client, thinkingMode: "enabled" });
+    await agent.chatAnthropic("Think hard");
+
+    expect(capturedParams.max_tokens).toBe(THINKING_MAX_TOKENS);
+    expect(capturedParams.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: THINKING_MAX_TOKENS - 1,
+    });
+  });
+
+  test("adaptive mode sends thinking param with 10k budget", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+    let capturedParams: Record<string, unknown> = {};
+    const client = mockClient((params: Record<string, unknown>) => {
+      capturedParams = params;
+      return fakeStream(msg);
+    });
+
+    const agent = new Agent({ client, thinkingMode: "adaptive" });
+    await agent.chatAnthropic("Think a bit");
+
+    expect(capturedParams.max_tokens).toBe(THINKING_MAX_TOKENS);
+    expect(capturedParams.thinking).toEqual({
+      type: "enabled",
+      budget_tokens: 10_000,
+    });
+  });
+
+  test("disabled mode does not send thinking param", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+    let capturedParams: Record<string, unknown> = {};
+    const client = mockClient((params: Record<string, unknown>) => {
+      capturedParams = params;
+      return fakeStream(msg);
+    });
+
+    const agent = new Agent({ client, thinkingMode: "disabled" });
+    await agent.chatAnthropic("Normal");
+
+    expect(capturedParams.max_tokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(capturedParams.thinking).toBeUndefined();
+  });
+
+  test("strips thinking blocks from completed turns (no tool_use)", async () => {
+    const msg = makeMessage({
+      stop_reason: "end_turn",
+      content: [
+        { type: "thinking", thinking: "internal reasoning" } as any,
+        { type: "text", text: "Final answer" },
+      ],
+    });
+    const client = mockClient(() => fakeStream(msg));
+
+    const agent = new Agent({ client, thinkingMode: "enabled" });
+    const result = await agent.chatAnthropic("Think");
+
+    // Thinking blocks should be stripped from the response
+    const thinkingBlocks = result.response.content.filter(
+      (b: any) => b.type === "thinking",
+    );
+    expect(thinkingBlocks).toHaveLength(0);
+
+    // Text block should remain
+    const textBlocks = result.response.content.filter(
+      (b: any) => b.type === "text",
+    );
+    expect(textBlocks).toHaveLength(1);
+  });
+
+  test("preserves thinking blocks on tool_use turns", async () => {
+    const toolMsg = makeMessage({
+      stop_reason: "tool_use",
+      content: [
+        { type: "thinking", thinking: "internal reasoning" } as any,
+        { type: "text", text: "Let me use a tool" },
+        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+      ],
+    });
+    const endMsg = makeMessage({ stop_reason: "end_turn" });
+
+    let callCount = 0;
+    const client = mockClient(() => {
+      callCount++;
+      return fakeStream(callCount === 1 ? toolMsg : endMsg);
+    });
+
+    const agent = new Agent({
+      client,
+      thinkingMode: "enabled",
+      executeTool: async () => "file content",
+    });
+    const result = await agent.chatAnthropic("Read a file");
+
+    // The assistant message from the tool_use turn should keep thinking blocks
+    const assistantMsg = result.messages.find(
+      (m) => m.role === "assistant" && Array.isArray(m.content),
+    );
+    expect(assistantMsg).toBeDefined();
+    const thinkingBlocks = (assistantMsg!.content as any[]).filter(
+      (b: any) => b.type === "thinking",
+    );
+    expect(thinkingBlocks).toHaveLength(1);
+  });
+
+  test("default thinkingMode is disabled", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+    let capturedParams: Record<string, unknown> = {};
+    const client = mockClient((params: Record<string, unknown>) => {
+      capturedParams = params;
+      return fakeStream(msg);
+    });
+
+    const agent = new Agent({ client });
+    await agent.chatAnthropic("Hello");
+
+    expect(capturedParams.thinking).toBeUndefined();
+    expect(capturedParams.max_tokens).toBe(DEFAULT_MAX_TOKENS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. getMessages — read-only snapshot
 // ---------------------------------------------------------------------------
 
 describe("getMessages", () => {
