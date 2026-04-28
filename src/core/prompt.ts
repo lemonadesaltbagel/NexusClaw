@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import { execSync } from "child_process";
 import * as os from "os";
 import { buildMemoryPromptSection } from "./memory.js";
@@ -12,9 +12,36 @@ import { getDeferredToolNames } from "../tools/definitions.js";
 // ---------------------------------------------------------------------------
 
 /** Resolve `@include` directives inside a CLAUDE.md file. */
-function resolveIncludes(content: string, _dir: string): string {
-  // TODO: implement @include resolution
-  return content;
+const INCLUDE_REGEX = /^@(\.\/[^\s]+|~\/[^\s]+|\/[^\s]+)$/gm;
+const MAX_INCLUDE_DEPTH = 5;
+
+export function resolveIncludes(
+  content: string,
+  basePath: string,
+  visited: Set<string> = new Set(),
+  depth: number = 0
+): string {
+  if (depth >= MAX_INCLUDE_DEPTH) return content;
+  return content.replace(INCLUDE_REGEX, (_match, rawPath: string) => {
+    let resolved: string;
+    if (rawPath.startsWith("~/")) {
+      resolved = join(os.homedir(), rawPath.slice(2));
+    } else if (rawPath.startsWith("/")) {
+      resolved = rawPath;
+    } else {
+      resolved = resolve(basePath, rawPath); // ./relative
+    }
+    resolved = resolve(resolved);
+    if (visited.has(resolved)) return `<!-- circular: ${rawPath} -->`;
+    if (!existsSync(resolved)) return `<!-- not found: ${rawPath} -->`;
+    try {
+      visited.add(resolved);
+      const included = readFileSync(resolved, "utf-8");
+      return resolveIncludes(included, dirname(resolved), visited, depth + 1);
+    } catch {
+      return `<!-- error reading: ${rawPath} -->`;
+    }
+  });
 }
 
 /** Load any Markdown rules from `.claude/rules/*.md`. */
