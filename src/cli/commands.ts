@@ -6,6 +6,8 @@ import { buildSystemPrompt } from "@/core/prompt";
 import { getActiveToolDefinitions } from "@/tools/definitions";
 import { executeTool } from "@/tools/executor";
 import { runRepl } from "@/cli/repl";
+import { getLatestSessionId, loadSession } from "@/core/session";
+import { printToolCall, printToolResult } from "@/cli/ui";
 
 // ---------------------------------------------------------------------------
 // API key resolution
@@ -18,24 +20,6 @@ function resolveApiKey(apiBase?: string): string | undefined {
   }
   // Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY
   return process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
-}
-
-// ---------------------------------------------------------------------------
-// Session persistence (stubs)
-// ---------------------------------------------------------------------------
-
-function getLatestSessionId(): string | null {
-  // TODO: scan session directory for most recent session
-  return null;
-}
-
-function loadSession(_sessionId: string): unknown {
-  // TODO: load saved messages from disk
-  return null;
-}
-
-function restoreSession(_agent: Agent, _session: unknown): void {
-  // TODO: restore messages into agent
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +86,8 @@ export const chatCommand = new Command("chat")
       tools,
       executeTool,
       onText: (delta) => process.stdout.write(delta),
+      onToolCall: printToolCall,
+      onToolResult: printToolResult,
     });
 
     // --- Resume previous session if requested ---
@@ -109,7 +95,7 @@ export const chatCommand = new Command("chat")
       const sessionId = getLatestSessionId();
       if (sessionId) {
         const session = loadSession(sessionId);
-        if (session) restoreSession(agent, session);
+        if (session) agent.restoreSession(session);
       }
     }
 

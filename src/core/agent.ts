@@ -9,6 +9,7 @@ import {
   type QueryResult,
   type ToolUseBlock,
 } from "@/core/types";
+import { saveSession, type SessionData } from "@/core/session";
 
 // ---------------------------------------------------------------------------
 // Agent — single-class orchestrator for a conversational coding agent.
@@ -32,6 +33,10 @@ export interface AgentOptions {
   compactMessages?: (messages: MessageParam[]) => Promise<MessageParam[]>;
   /** Called for each text delta as the response streams in. */
   onText?: (delta: string) => void;
+  /** Called before a tool is executed. */
+  onToolCall?: (name: string, input: Record<string, unknown>) => void;
+  /** Called after a tool finishes with its result string. */
+  onToolResult?: (name: string, result: string) => void;
   /** Stop hook — return true to *block* the turn from completing. */
   checkStopHook?: (response: Message) => Promise<boolean>;
 }
@@ -48,8 +53,12 @@ export class Agent {
   private collapseContext: NonNullable<AgentOptions["collapseContext"]>;
   private compactMessages: NonNullable<AgentOptions["compactMessages"]>;
   private onText: (delta: string) => void;
+  private onToolCall: (name: string, input: Record<string, unknown>) => void;
+  private onToolResult: (name: string, result: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
   private abortController: AbortController | null = null;
+  private sessionId: string = crypto.randomUUID();
+  private sessionStartTime: string = new Date().toISOString();
 
   constructor(options: AgentOptions) {
     this.client = options.client;
@@ -66,6 +75,8 @@ export class Agent {
     this.compactMessages =
       options.compactMessages ?? (async (msgs) => msgs);
     this.onText = options.onText ?? (() => {});
+    this.onToolCall = options.onToolCall ?? (() => {});
+    this.onToolResult = options.onToolResult ?? (() => {});
     this.checkStopHook = options.checkStopHook;
   }
 
@@ -82,6 +93,47 @@ export class Agent {
   /** Clear conversation history. */
   clearHistory(): void {
     this.messages = [];
+  }
+
+  /** Restore a previously saved session into this agent. */
+  restoreSession(data: { messages: MessageParam[] }): void {
+    if (data.messages) {
+      this.messages = data.messages;
+      console.error(`Session restored (${this.getMessageCount()} messages).`);
+    }
+  }
+
+  /** Number of user messages in the conversation. */
+  getMessageCount(): number {
+    return this.messages.filter((m) => m.role === "user").length;
+  }
+
+  /** The session ID for this agent instance. */
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  /** The model name this agent is using. */
+  getModel(): string {
+    return this.model;
+  }
+
+  /** Persist the current session to disk. */
+  private autoSave(): void {
+    try {
+      saveSession(this.sessionId, {
+        metadata: {
+          id: this.sessionId,
+          model: this.model,
+          cwd: process.cwd(),
+          startTime: this.sessionStartTime,
+          messageCount: this.getMessageCount(),
+        },
+        messages: this.messages,
+      });
+    } catch {
+      // best-effort — don't break the conversation
+    }
   }
 
   /** Display accumulated cost. */
@@ -106,6 +158,7 @@ export class Agent {
       await this.chatAnthropic(userMessage);
     } finally {
       this.abortController = null;
+      this.autoSave();
     }
   }
 
@@ -241,15 +294,17 @@ export class Agent {
     for (const block of toolBlocks) {
       if (this.abortController?.signal.aborted) break;
 
+      const toolInput = block.input as Record<string, unknown>;
+      this.onToolCall(block.name, toolInput);
+
       let content: string;
       try {
-        content = await this.executeTool(
-          block.name,
-          block.input as Record<string, unknown>,
-        );
+        content = await this.executeTool(block.name, toolInput);
       } catch (err) {
         content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
       }
+
+      this.onToolResult(block.name, content);
 
       toolResults.push({
         type: "tool_result",
