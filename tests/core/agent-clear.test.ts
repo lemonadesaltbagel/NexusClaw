@@ -39,10 +39,10 @@ function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
 }
 
 // ---------------------------------------------------------------------------
-// clearMessages
+// clearHistory
 // ---------------------------------------------------------------------------
 
-describe("clearMessages", () => {
+describe("clearHistory", () => {
   test("empties message history", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
     const client = mockClient(() => fakeStream(msg));
@@ -52,7 +52,7 @@ describe("clearMessages", () => {
 
     expect(agent.getMessages().length).toBeGreaterThan(0);
 
-    agent.clearMessages();
+    agent.clearHistory();
     expect(agent.getMessages()).toHaveLength(0);
   });
 
@@ -62,7 +62,7 @@ describe("clearMessages", () => {
 
     const agent = new Agent({ client });
     await agent.chatAnthropic("First");
-    agent.clearMessages();
+    agent.clearHistory();
     await agent.chatAnthropic("Second");
 
     const msgs = agent.getMessages();

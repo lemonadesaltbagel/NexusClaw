@@ -74,9 +74,29 @@ export class Agent {
     return this.messages;
   }
 
-  /** Clear conversation history (used by REPL /clear command). */
-  clearMessages(): void {
+  /** Whether the agent is currently processing a turn. */
+  get isProcessing(): boolean {
+    return this.abortController !== null;
+  }
+
+  /** Clear conversation history. */
+  clearHistory(): void {
     this.messages = [];
+  }
+
+  /** Display accumulated cost. */
+  showCost(): void {
+    // TODO: implement cost tracking and display
+  }
+
+  /** Compact conversation history to free context space. */
+  async compact(): Promise<void> {
+    // TODO: implement user-facing compaction
+  }
+
+  /** Toggle plan mode on/off. */
+  togglePlanMode(): void {
+    // TODO: implement plan mode toggle
   }
 
   /** High-level entry point: runs one full turn with abort support. */

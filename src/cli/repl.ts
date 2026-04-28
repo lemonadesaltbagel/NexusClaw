@@ -1,65 +1,75 @@
 import * as readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 import type { Agent } from "@/core/agent";
+
+// ---------------------------------------------------------------------------
+// Print helpers (stubs)
+// ---------------------------------------------------------------------------
+
+function printWelcome(): void {
+  // TODO: implement welcome banner
+}
+
+function printUserPrompt(): void {
+  // TODO: implement user prompt indicator
+}
+
+function printError(message: string): void {
+  // TODO: implement styled error output
+  console.error(message);
+}
 
 // ---------------------------------------------------------------------------
 // REPL — interactive read-eval-print loop for the coding agent.
 // ---------------------------------------------------------------------------
 
 export async function runRepl(agent: Agent): Promise<void> {
-  const rl = readline.createInterface({ input, output });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-  console.log("\nnexuscode — interactive mode. Type /exit or Ctrl-D to quit.\n");
-
-  // Graceful Ctrl-C: abort the current turn instead of killing the process.
+  let sigintCount = 0;
   process.on("SIGINT", () => {
-    agent.abort();
-    // Print a newline so the next prompt isn't on the same line as ^C
-    process.stdout.write("\n");
+    if (agent.isProcessing) {
+      agent.abort();
+      console.log("\n  (interrupted)");
+      sigintCount = 0;
+      printUserPrompt();
+    } else {
+      sigintCount++;
+      if (sigintCount >= 2) { console.log("\nBye!\n"); process.exit(0); }
+      console.log("\n  Press Ctrl+C again to exit.");
+      printUserPrompt();
+    }
   });
 
-  try {
-    while (true) {
-      let line: string;
-      try {
-        line = await rl.question("> ");
-      } catch {
-        // EOF (Ctrl-D) — exit gracefully
-        break;
+  printWelcome();
+
+  // rl.once instead of rl.on: ensures strict serialization, prevents
+  // multiple chats from concurrently modifying message history
+  const askQuestion = (): void => {
+    printUserPrompt();
+    rl.once("line", async (line) => {
+      const input = line.trim();
+      sigintCount = 0;
+
+      if (!input) { askQuestion(); return; }
+      if (input === "exit" || input === "quit") { console.log("\nBye!\n"); process.exit(0); }
+
+      if (input === "/clear") { agent.clearHistory(); askQuestion(); return; }
+      if (input === "/cost")  { agent.showCost(); askQuestion(); return; }
+      if (input === "/compact") {
+        try { await agent.compact(); } catch (e: any) { printError(e.message); }
+        askQuestion(); return;
       }
-
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-
-      // Built-in slash commands
-      if (trimmed === "/exit" || trimmed === "/quit") break;
-
-      if (trimmed === "/clear") {
-        agent.clearMessages();
-        console.log("Conversation cleared.\n");
-        continue;
-      }
-
-      if (trimmed === "/history") {
-        const msgs = agent.getMessages();
-        console.log(`${msgs.length} message(s) in conversation.\n`);
-        continue;
-      }
+      if (input === "/plan") { agent.togglePlanMode(); askQuestion(); return; }
 
       try {
-        await agent.chat(trimmed);
-      } catch (err) {
-        console.error(
-          `\nError: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        await agent.chat(input);
+      } catch (e: any) {
+        if (e.name !== "AbortError" && !e.message?.includes("aborted")) printError(e.message);
       }
 
-      // Blank line between turns for readability
-      process.stdout.write("\n");
-    }
-  } finally {
-    rl.close();
-  }
+      askQuestion();
+    });
+  };
 
-  console.log("Goodbye.");
+  askQuestion();
 }
