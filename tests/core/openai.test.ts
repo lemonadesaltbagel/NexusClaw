@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { toOpenAITools, toOpenAIMessages } from "@/core/openai";
+import { toOpenAITools, toOpenAIMessages } from "@/core/providers/openai";
 import type { MessageParam } from "@/core/types";
 
 // ---------------------------------------------------------------------------

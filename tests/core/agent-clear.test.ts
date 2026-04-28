@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import Anthropic from "@anthropic-ai/sdk";
 import { Agent } from "@/core/agent";
+import type { Provider } from "@/core/provider";
 import type { Message } from "@/core/types";
 
 // ---------------------------------------------------------------------------
@@ -23,19 +23,11 @@ function makeMessage(
   } as Message;
 }
 
-function fakeStream(msg: Message) {
+function mockProvider(): Provider {
+  const msg = makeMessage({ stop_reason: "end_turn" });
   return {
-    on(_event: string, _cb: (delta: string) => void) {},
-    async finalMessage() {
-      return msg;
-    },
+    createMessage: async () => msg,
   };
-}
-
-function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
-  return {
-    messages: { stream: streamFn },
-  } as unknown as Anthropic;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,11 +36,8 @@ function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
 
 describe("clearHistory", () => {
   test("empties message history", async () => {
-    const msg = makeMessage({ stop_reason: "end_turn" });
-    const client = mockClient(() => fakeStream(msg));
-
-    const agent = new Agent({ client });
-    await agent.chatAnthropic("First message");
+    const agent = new Agent({ provider: mockProvider() });
+    await agent.chat("First message");
 
     expect(agent.getMessages().length).toBeGreaterThan(0);
 
@@ -57,13 +46,10 @@ describe("clearHistory", () => {
   });
 
   test("agent works normally after clearing messages", async () => {
-    const msg = makeMessage({ stop_reason: "end_turn" });
-    const client = mockClient(() => fakeStream(msg));
-
-    const agent = new Agent({ client });
-    await agent.chatAnthropic("First");
+    const agent = new Agent({ provider: mockProvider() });
+    await agent.chat("First");
     agent.clearHistory();
-    await agent.chatAnthropic("Second");
+    await agent.chat("Second");
 
     const msgs = agent.getMessages();
     expect(msgs).toHaveLength(1);

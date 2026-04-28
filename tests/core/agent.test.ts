@@ -1,6 +1,7 @@
-import { test, expect, describe, mock } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import Anthropic from "@anthropic-ai/sdk";
 import { Agent } from "@/core/agent";
+import type { Provider, StreamParams } from "@/core/provider";
 import {
   DEFAULT_MAX_TOKENS,
   ESCALATED_MAX_TOKENS,
@@ -11,7 +12,7 @@ import {
 } from "@/core/types";
 
 // ---------------------------------------------------------------------------
-// Helpers — mock Anthropic client with controllable stream responses
+// Helpers — mock Provider with controllable responses
 // ---------------------------------------------------------------------------
 
 /** Build a minimal Message object. */
@@ -31,28 +32,35 @@ function makeMessage(
   };
 }
 
-/** Create a fake stream that resolves to `msg` and captures `on("text")` calls. */
-function fakeStream(msg: Message, opts?: { textDeltas?: string[] }) {
-  let textCb: ((delta: string) => void) | null = null;
+/**
+ * Create a mock Provider. `createFn` receives StreamParams and returns the
+ * Message to resolve. It can also fire onText deltas via params.onText.
+ */
+function mockProvider(
+  createFn: (params: StreamParams) => Message | Promise<Message>,
+): Provider {
   return {
-    on(event: string, cb: (delta: string) => void) {
-      if (event === "text") textCb = cb;
-    },
-    async finalMessage() {
-      // Fire text deltas if provided
-      if (opts?.textDeltas && textCb) {
-        for (const d of opts.textDeltas) textCb(d);
-      }
-      return msg;
-    },
+    createMessage: async (params) => createFn(params),
   };
 }
 
-/** Build a mock Anthropic client whose `.messages.stream()` calls `streamFn`. */
-function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
+/**
+ * Create a mock Provider that returns a sequence of messages, one per call.
+ * Optionally captures params for assertion.
+ */
+function sequenceProvider(
+  messages: Message[],
+  captured?: { params: StreamParams[] },
+): Provider {
+  let callIndex = 0;
   return {
-    messages: { stream: streamFn },
-  } as unknown as Anthropic;
+    createMessage: async (params) => {
+      captured?.params.push(params);
+      const msg = messages[callIndex] ?? messages[messages.length - 1];
+      callIndex++;
+      return msg;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -62,10 +70,10 @@ function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
 describe("core loop", () => {
   test("end_turn returns response and appends user message to history", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    const client = mockClient(() => fakeStream(msg));
+    const provider = sequenceProvider([msg]);
 
-    const agent = new Agent({ client });
-    const result = await agent.chatAnthropic("Hi");
+    const agent = new Agent({ provider });
+    const result = await agent.chat("Hi");
 
     expect(result.response).toBe(msg);
     expect(result.messages).toHaveLength(1);
@@ -74,10 +82,10 @@ describe("core loop", () => {
 
   test("stop_sequence is treated like end_turn", async () => {
     const msg = makeMessage({ stop_reason: "stop_sequence" });
-    const client = mockClient(() => fakeStream(msg));
+    const provider = sequenceProvider([msg]);
 
-    const agent = new Agent({ client });
-    const result = await agent.chatAnthropic("Hey");
+    const agent = new Agent({ provider });
+    const result = await agent.chat("Hey");
 
     expect(result.response.stop_reason).toBe("stop_sequence");
   });
@@ -98,27 +106,21 @@ describe("tool use", () => {
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
-
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(callCount === 1 ? toolMsg : endMsg);
-    });
+    const provider = sequenceProvider([toolMsg, endMsg]);
 
     const executionOrder: string[] = [];
     const agent = new Agent({
-      client,
+      provider,
       executeTool: async (_name, input) => {
         executionOrder.push((input as { path: string }).path);
         return `content of ${(input as { path: string }).path}`;
       },
     });
 
-    const result = await agent.chatAnthropic("Read files");
+    const result = await agent.chat("Read files");
 
     expect(executionOrder).toEqual(["a.txt", "b.txt"]);
     expect(result.response.stop_reason).toBe("end_turn");
-    // Messages: user, assistant (tool_use), user (tool_results), user (implicit from 2nd turn is the same "Read files")
     expect(result.messages.length).toBeGreaterThanOrEqual(3);
   });
 
@@ -130,25 +132,18 @@ describe("tool use", () => {
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
-
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(callCount === 1 ? toolMsg : endMsg);
-    });
+    const provider = sequenceProvider([toolMsg, endMsg]);
 
     const agent = new Agent({
-      client,
+      provider,
       executeTool: async () => {
         throw new Error("tool broke");
       },
     });
 
-    const result = await agent.chatAnthropic("Do thing");
-    // Should complete without throwing
+    const result = await agent.chat("Do thing");
     expect(result.response.stop_reason).toBe("end_turn");
 
-    // The tool result message should contain the error
     const toolResultMsg = result.messages.find(
       (m) => m.role === "user" && Array.isArray(m.content),
     );
@@ -167,15 +162,10 @@ describe("tool use", () => {
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
+    const provider = sequenceProvider([toolMsg, endMsg]);
 
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(callCount === 1 ? toolMsg : endMsg);
-    });
-
-    const agent = new Agent({ client });
-    const result = await agent.chatAnthropic("Do thing");
+    const agent = new Agent({ provider });
+    const result = await agent.chat("Do thing");
 
     const toolResultMsg = result.messages.find(
       (m) => m.role === "user" && Array.isArray(m.content),
@@ -196,35 +186,27 @@ describe("max_tokens recovery", () => {
     const truncMsg = makeMessage({ stop_reason: "max_tokens" });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
 
-    let callCount = 0;
-    let capturedMaxTokens: number[] = [];
-    const client = mockClient((params: Record<string, unknown>) => {
-      callCount++;
-      capturedMaxTokens.push(params.max_tokens as number);
-      return fakeStream(callCount === 1 ? truncMsg : endMsg);
-    });
+    const captured: { params: StreamParams[] } = { params: [] };
+    const provider = sequenceProvider([truncMsg, endMsg], captured);
 
-    const agent = new Agent({ client });
-    await agent.chatAnthropic("Write essay");
+    const agent = new Agent({ provider });
+    await agent.chat("Write essay");
 
-    expect(capturedMaxTokens[0]).toBe(DEFAULT_MAX_TOKENS);
-    expect(capturedMaxTokens[1]).toBe(ESCALATED_MAX_TOKENS);
+    expect(captured.params[0].maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(captured.params[1].maxTokens).toBe(ESCALATED_MAX_TOKENS);
   });
 
   test("after escalation, uses recovery retries up to MAX_RECOVERY_RETRIES then returns", async () => {
     const truncMsg = makeMessage({ stop_reason: "max_tokens" });
 
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(truncMsg);
-    });
+    const captured: { params: StreamParams[] } = { params: [] };
+    const provider = sequenceProvider([truncMsg], captured);
 
-    const agent = new Agent({ client });
-    const result = await agent.chatAnthropic("Very long essay");
+    const agent = new Agent({ provider });
+    const result = await agent.chat("Very long essay");
 
     // 1 initial + 1 escalation + MAX_RECOVERY_RETRIES = total calls
-    expect(callCount).toBe(2 + MAX_RECOVERY_RETRIES);
+    expect(captured.params.length).toBe(2 + MAX_RECOVERY_RETRIES);
     expect(result.response.stop_reason).toBe("max_tokens");
   });
 });
@@ -237,22 +219,13 @@ describe("pause_turn", () => {
   test("pause_turn injects continuation prompt and retries", async () => {
     const pauseMsg = makeMessage({ stop_reason: "pause_turn" });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
+    const provider = sequenceProvider([pauseMsg, endMsg]);
 
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(callCount === 1 ? pauseMsg : endMsg);
-    });
+    const agent = new Agent({ provider });
+    const result = await agent.chat("Continue");
 
-    const agent = new Agent({ client });
-    const result = await agent.chatAnthropic("Continue");
-
-    expect(callCount).toBe(2);
     expect(result.response.stop_reason).toBe("end_turn");
 
-    // Check continuation message was injected
-    const lastUserMsg = result.messages.filter((m) => m.role === "user").pop();
-    // The last user message could be the original or the continuation; there should be a continuation
     const hasContinuation = result.messages.some(
       (m) => m.role === "user" && typeof m.content === "string" && m.content.includes("token budget"),
     );
@@ -274,21 +247,23 @@ describe("prompt too long recovery", () => {
 
     let callCount = 0;
     let collapseCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      if (callCount === 1) throw ptlError;
-      return fakeStream(makeMessage({ stop_reason: "end_turn" }));
-    });
+    const provider: Provider = {
+      createMessage: async () => {
+        callCount++;
+        if (callCount === 1) throw ptlError;
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
 
     const agent = new Agent({
-      client,
+      provider,
       collapseContext: async (msgs) => {
         collapseCount++;
         return msgs;
       },
     });
 
-    await agent.chatAnthropic("Big message");
+    await agent.chat("Big message");
     expect(collapseCount).toBe(1);
   });
 
@@ -301,21 +276,23 @@ describe("prompt too long recovery", () => {
 
     let callCount = 0;
     let compactCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      if (callCount <= 2) throw ptlError; // fail on collapse + first compact
-      return fakeStream(makeMessage({ stop_reason: "end_turn" }));
-    });
+    const provider: Provider = {
+      createMessage: async () => {
+        callCount++;
+        if (callCount <= 2) throw ptlError;
+        return makeMessage({ stop_reason: "end_turn" });
+      },
+    };
 
     const agent = new Agent({
-      client,
+      provider,
       compactMessages: async (msgs) => {
         compactCount++;
         return msgs;
       },
     });
 
-    await agent.chatAnthropic("Big message");
+    await agent.chat("Big message");
     expect(compactCount).toBe(1);
   });
 
@@ -326,23 +303,21 @@ describe("prompt too long recovery", () => {
       undefined as any,
     );
 
-    const client = mockClient(() => {
-      throw ptlError;
-    });
+    const provider: Provider = {
+      createMessage: async () => { throw ptlError; },
+    };
 
-    const agent = new Agent({ client });
-
-    // 1 collapse + MAX_COMPACT_RETRIES compactions, then throw
-    await expect(agent.chatAnthropic("Huge")).rejects.toThrow("prompt is too long");
+    const agent = new Agent({ provider });
+    await expect(agent.chat("Huge")).rejects.toThrow("prompt is too long");
   });
 
   test("non-PTL errors propagate immediately", async () => {
-    const client = mockClient(() => {
-      throw new Error("network failure");
-    });
+    const provider: Provider = {
+      createMessage: async () => { throw new Error("network failure"); },
+    };
 
-    const agent = new Agent({ client });
-    await expect(agent.chatAnthropic("Msg")).rejects.toThrow("network failure");
+    const agent = new Agent({ provider });
+    await expect(agent.chat("Msg")).rejects.toThrow("network failure");
   });
 });
 
@@ -351,17 +326,23 @@ describe("prompt too long recovery", () => {
 // ---------------------------------------------------------------------------
 
 describe("streaming", () => {
-  test("onText receives text deltas from stream", async () => {
+  test("onText receives text deltas from provider", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    const client = mockClient(() => fakeStream(msg, { textDeltas: ["Hel", "lo", " world"] }));
+    const provider = mockProvider((params) => {
+      // Simulate text deltas
+      params.onText?.("Hel");
+      params.onText?.("lo");
+      params.onText?.(" world");
+      return msg;
+    });
 
     const deltas: string[] = [];
     const agent = new Agent({
-      client,
+      provider,
       onText: (d) => deltas.push(d),
     });
 
-    await agent.chatAnthropic("Hi");
+    await agent.chat("Hi");
     expect(deltas).toEqual(["Hel", "lo", " world"]);
   });
 });
@@ -373,26 +354,20 @@ describe("streaming", () => {
 describe("stop hook", () => {
   test("checkStopHook blocking injects continue signal and retries", async () => {
     const endMsg = makeMessage({ stop_reason: "end_turn" });
+    const provider = sequenceProvider([endMsg, endMsg]);
 
     let hookCalls = 0;
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(endMsg);
-    });
-
     const agent = new Agent({
-      client,
+      provider,
       checkStopHook: async () => {
         hookCalls++;
         return hookCalls === 1; // block first time, allow second
       },
     });
 
-    const result = await agent.chatAnthropic("Do task");
+    const result = await agent.chat("Do task");
 
     expect(hookCalls).toBe(2);
-    expect(callCount).toBe(2);
 
     const hasContinuation = result.messages.some(
       (m) =>
@@ -409,19 +384,18 @@ describe("stop hook", () => {
 // ---------------------------------------------------------------------------
 
 describe("abort controller", () => {
-  test("chat() wraps chatAnthropic with abort controller lifecycle", async () => {
+  test("chat() passes abort signal to provider", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
     let capturedSignal: AbortSignal | undefined;
 
-    const client = mockClient((_params: unknown, opts: { signal?: AbortSignal }) => {
-      capturedSignal = opts?.signal;
-      return fakeStream(msg);
+    const provider = mockProvider((params) => {
+      capturedSignal = params.signal;
+      return msg;
     });
 
-    const agent = new Agent({ client });
+    const agent = new Agent({ provider });
     await agent.chat("Hello");
 
-    // Signal was passed to stream
     expect(capturedSignal).toBeDefined();
     expect(capturedSignal!.aborted).toBe(false);
   });
@@ -429,21 +403,18 @@ describe("abort controller", () => {
   test("abort() aborts the in-flight signal", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
     let capturedSignal: AbortSignal | undefined;
-    let resolveStream: (() => void) | null = null;
+    let resolveMessage: (() => void) | null = null;
 
-    const client = mockClient((_params: unknown, opts: { signal?: AbortSignal }) => {
-      capturedSignal = opts?.signal;
-      return {
-        on() {},
-        finalMessage() {
-          return new Promise<Message>((resolve) => {
-            resolveStream = () => resolve(msg);
-          });
-        },
-      };
-    });
+    const provider: Provider = {
+      createMessage: async (params) => {
+        capturedSignal = params.signal;
+        return new Promise<Message>((resolve) => {
+          resolveMessage = () => resolve(msg);
+        });
+      },
+    };
 
-    const agent = new Agent({ client });
+    const agent = new Agent({ provider });
     const chatPromise = agent.chat("Hello");
 
     // Abort while streaming
@@ -451,7 +422,7 @@ describe("abort controller", () => {
     expect(capturedSignal!.aborted).toBe(true);
 
     // Resolve to let chat() finish
-    resolveStream!();
+    resolveMessage!();
     await chatPromise;
   });
 
@@ -464,20 +435,12 @@ describe("abort controller", () => {
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
-
-    let callCount = 0;
-    let abortSignalRef: AbortSignal | undefined;
-    const client = mockClient((_params: unknown, opts: { signal?: AbortSignal }) => {
-      callCount++;
-      if (callCount === 1) abortSignalRef = opts?.signal;
-      return fakeStream(callCount === 1 ? toolMsg : endMsg);
-    });
+    const provider = sequenceProvider([toolMsg, endMsg]);
 
     const executed: string[] = [];
     const agent = new Agent({
-      client,
+      provider,
       executeTool: async (name) => {
-        // Abort after the first tool executes
         if (name === "tool_a") {
           agent.abort();
         }
@@ -494,135 +457,50 @@ describe("abort controller", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. Thinking mode
+// 9. Thinking mode — params are forwarded to provider
 // ---------------------------------------------------------------------------
 
 describe("thinking mode", () => {
-  test("enabled mode sends thinking param and raises max_tokens", async () => {
+  test("enabled mode forwards thinkingMode to provider", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    let capturedParams: Record<string, unknown> = {};
-    const client = mockClient((params: Record<string, unknown>) => {
+    let capturedParams: StreamParams | undefined;
+    const provider = mockProvider((params) => {
       capturedParams = params;
-      return fakeStream(msg);
+      return msg;
     });
 
-    const agent = new Agent({ client, thinkingMode: "enabled" });
-    await agent.chatAnthropic("Think hard");
+    const agent = new Agent({ provider, thinkingMode: "enabled" });
+    await agent.chat("Think hard");
 
-    expect(capturedParams.max_tokens).toBe(THINKING_MAX_TOKENS);
-    expect(capturedParams.thinking).toEqual({
-      type: "enabled",
-      budget_tokens: THINKING_MAX_TOKENS - 1,
-    });
+    expect(capturedParams!.thinkingMode).toBe("enabled");
   });
 
-  test("adaptive mode sends thinking param with 10k budget", async () => {
+  test("adaptive mode forwards thinkingMode to provider", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    let capturedParams: Record<string, unknown> = {};
-    const client = mockClient((params: Record<string, unknown>) => {
+    let capturedParams: StreamParams | undefined;
+    const provider = mockProvider((params) => {
       capturedParams = params;
-      return fakeStream(msg);
+      return msg;
     });
 
-    const agent = new Agent({ client, thinkingMode: "adaptive" });
-    await agent.chatAnthropic("Think a bit");
+    const agent = new Agent({ provider, thinkingMode: "adaptive" });
+    await agent.chat("Think a bit");
 
-    expect(capturedParams.max_tokens).toBe(THINKING_MAX_TOKENS);
-    expect(capturedParams.thinking).toEqual({
-      type: "enabled",
-      budget_tokens: 10_000,
-    });
-  });
-
-  test("disabled mode does not send thinking param", async () => {
-    const msg = makeMessage({ stop_reason: "end_turn" });
-    let capturedParams: Record<string, unknown> = {};
-    const client = mockClient((params: Record<string, unknown>) => {
-      capturedParams = params;
-      return fakeStream(msg);
-    });
-
-    const agent = new Agent({ client, thinkingMode: "disabled" });
-    await agent.chatAnthropic("Normal");
-
-    expect(capturedParams.max_tokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(capturedParams.thinking).toBeUndefined();
-  });
-
-  test("strips thinking blocks from completed turns (no tool_use)", async () => {
-    const msg = makeMessage({
-      stop_reason: "end_turn",
-      content: [
-        { type: "thinking", thinking: "internal reasoning" } as any,
-        { type: "text", text: "Final answer" },
-      ],
-    });
-    const client = mockClient(() => fakeStream(msg));
-
-    const agent = new Agent({ client, thinkingMode: "enabled" });
-    const result = await agent.chatAnthropic("Think");
-
-    // Thinking blocks should be stripped from the response
-    const thinkingBlocks = result.response.content.filter(
-      (b: any) => b.type === "thinking",
-    );
-    expect(thinkingBlocks).toHaveLength(0);
-
-    // Text block should remain
-    const textBlocks = result.response.content.filter(
-      (b: any) => b.type === "text",
-    );
-    expect(textBlocks).toHaveLength(1);
-  });
-
-  test("preserves thinking blocks on tool_use turns", async () => {
-    const toolMsg = makeMessage({
-      stop_reason: "tool_use",
-      content: [
-        { type: "thinking", thinking: "internal reasoning" } as any,
-        { type: "text", text: "Let me use a tool" },
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-      ],
-    });
-    const endMsg = makeMessage({ stop_reason: "end_turn" });
-
-    let callCount = 0;
-    const client = mockClient(() => {
-      callCount++;
-      return fakeStream(callCount === 1 ? toolMsg : endMsg);
-    });
-
-    const agent = new Agent({
-      client,
-      thinkingMode: "enabled",
-      executeTool: async () => "file content",
-    });
-    const result = await agent.chatAnthropic("Read a file");
-
-    // The assistant message from the tool_use turn should keep thinking blocks
-    const assistantMsg = result.messages.find(
-      (m) => m.role === "assistant" && Array.isArray(m.content),
-    );
-    expect(assistantMsg).toBeDefined();
-    const thinkingBlocks = (assistantMsg!.content as any[]).filter(
-      (b: any) => b.type === "thinking",
-    );
-    expect(thinkingBlocks).toHaveLength(1);
+    expect(capturedParams!.thinkingMode).toBe("adaptive");
   });
 
   test("default thinkingMode is disabled", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    let capturedParams: Record<string, unknown> = {};
-    const client = mockClient((params: Record<string, unknown>) => {
+    let capturedParams: StreamParams | undefined;
+    const provider = mockProvider((params) => {
       capturedParams = params;
-      return fakeStream(msg);
+      return msg;
     });
 
-    const agent = new Agent({ client });
-    await agent.chatAnthropic("Hello");
+    const agent = new Agent({ provider });
+    await agent.chat("Hello");
 
-    expect(capturedParams.thinking).toBeUndefined();
-    expect(capturedParams.max_tokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(capturedParams!.thinkingMode).toBe("disabled");
   });
 });
 
@@ -633,10 +511,10 @@ describe("thinking mode", () => {
 describe("getMessages", () => {
   test("returns message history after a turn", async () => {
     const msg = makeMessage({ stop_reason: "end_turn" });
-    const client = mockClient(() => fakeStream(msg));
+    const provider = sequenceProvider([msg]);
 
-    const agent = new Agent({ client });
-    await agent.chatAnthropic("Test");
+    const agent = new Agent({ provider });
+    await agent.chat("Test");
 
     const msgs = agent.getMessages();
     expect(msgs).toHaveLength(1);

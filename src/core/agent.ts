@@ -1,9 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type OpenAI from "openai";
 import {
   DEFAULT_MAX_TOKENS,
   ESCALATED_MAX_TOKENS,
-  THINKING_MAX_TOKENS,
   MAX_COMPACT_RETRIES,
   MAX_RECOVERY_RETRIES,
   type Message,
@@ -12,22 +10,20 @@ import {
   type ThinkingMode,
   type ToolUseBlock,
 } from "@/core/types";
-import { saveSession, type SessionData } from "@/core/session";
-import { toOpenAIMessages, toOpenAITools } from "@/core/openai";
-import type { ToolDef } from "@/tools/definitions";
+import { saveSession } from "@/core/session";
+import type { Provider } from "@/core/provider";
+import { isPromptTooLongError } from "@/core/providers/anthropic";
 
 // ---------------------------------------------------------------------------
 // Agent — single-class orchestrator for a conversational coding agent.
 //
 // Manages the full conversation lifecycle: API calls, message history, tool
-// dispatch, context compaction, and token-limit recovery. chatAnthropic() is
-// the core method that drives one full user→assistant turn to completion.
+// dispatch, context compaction, and token-limit recovery. The Agent is
+// provider-agnostic — it delegates all API communication to a Provider.
 // ---------------------------------------------------------------------------
 
 export interface AgentOptions {
-  client: Anthropic;
-  /** Optional OpenAI client — when provided, agent uses OpenAI-compatible streaming. */
-  openaiClient?: OpenAI;
+  provider: Provider;
   model?: string;
   maxTokens?: number;
   system?: string | Anthropic.Messages.TextBlockParam[];
@@ -51,8 +47,7 @@ export interface AgentOptions {
 }
 
 export class Agent {
-  private client: Anthropic;
-  private openaiClient: OpenAI | null = null;
+  private provider: Provider;
   private model: string;
   private maxTokens: number;
   private system?: string | Anthropic.Messages.TextBlockParam[];
@@ -72,8 +67,7 @@ export class Agent {
   private sessionStartTime: string = new Date().toISOString();
 
   constructor(options: AgentOptions) {
-    this.client = options.client;
-    this.openaiClient = options.openaiClient ?? null;
+    this.provider = options.provider;
     this.model = options.model ?? "claude-sonnet-4-5-20250514";
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.system = options.system;
@@ -166,14 +160,10 @@ export class Agent {
   }
 
   /** High-level entry point: runs one full turn with abort support. */
-  async chat(userMessage: string): Promise<void> {
+  async chat(userMessage: string): Promise<QueryResult> {
     this.abortController = new AbortController();
     try {
-      if (this.openaiClient) {
-        await this.chatOpenAI(userMessage);
-      } else {
-        await this.chatAnthropic(userMessage);
-      }
+      return await this.runTurn(userMessage);
     } finally {
       this.abortController = null;
       this.autoSave();
@@ -186,10 +176,11 @@ export class Agent {
   }
 
   // -----------------------------------------------------------------------
-  // chatAnthropic — core method driving one full user→assistant turn.
+  // runTurn — core method driving one full user→assistant turn.
+  // Provider-agnostic: delegates streaming to this.provider.
   // -----------------------------------------------------------------------
 
-  async chatAnthropic(userMessage: string): Promise<QueryResult> {
+  private async runTurn(userMessage: string): Promise<QueryResult> {
     this.messages.push({ role: "user", content: userMessage });
 
     let currentMaxTokens = this.maxTokens;
@@ -204,49 +195,16 @@ export class Agent {
       let response: Message;
 
       try {
-        const effectiveMaxTokens =
-          this.thinkingMode !== "disabled"
-            ? Math.max(currentMaxTokens, THINKING_MAX_TOKENS)
-            : currentMaxTokens;
-
-        const createParams: Record<string, unknown> = {
+        response = await this.provider.createMessage({
           model: this.model,
-          max_tokens: effectiveMaxTokens,
+          maxTokens: currentMaxTokens,
           messages: this.messages,
-          ...(this.system !== undefined && { system: this.system }),
-          ...(this.tools?.length && { tools: this.tools }),
-        };
-
-        if (this.thinkingMode === "enabled") {
-          createParams.thinking = { type: "enabled", budget_tokens: effectiveMaxTokens - 1 };
-        } else if (this.thinkingMode === "adaptive") {
-          createParams.thinking = { type: "enabled", budget_tokens: 10_000 };
-        }
-
-        const stream = this.client.messages.stream(createParams as any, {
+          system: this.system,
+          tools: this.tools,
+          thinkingMode: this.thinkingMode,
           signal: this.abortController?.signal,
+          onText: (delta) => this.onText(delta),
         });
-
-        stream.on("text", (delta) => this.onText(delta));
-
-        const finalMessage = await stream.finalMessage();
-
-        // When thinking is active, strip thinking blocks from completed turns
-        // (no tool_use) to avoid wasting context in subsequent turns.
-        // Turns with tool_use must keep thinking blocks — the API requires
-        // the signature for validation when tool_result is sent back.
-        if (this.thinkingMode !== "disabled") {
-          const hasToolUse = finalMessage.content.some(
-            (block: any) => block.type === "tool_use",
-          );
-          if (!hasToolUse) {
-            (finalMessage as any).content = finalMessage.content.filter(
-              (block: any) => block.type !== "thinking",
-            );
-          }
-        }
-
-        response = finalMessage as Message;
       } catch (err: unknown) {
         // ---- Prompt-too-long handling (2-stage, withhold error) ----
         if (isPromptTooLongError(err)) {
@@ -324,160 +282,6 @@ export class Agent {
         }
       }
     }
-  }
-
-  // -----------------------------------------------------------------------
-  // chatOpenAI — core method driving one full user→assistant turn via OpenAI.
-  // -----------------------------------------------------------------------
-
-  async chatOpenAI(userMessage: string): Promise<QueryResult> {
-    this.messages.push({ role: "user", content: userMessage });
-
-    while (true) {
-      const completion = await this.callOpenAIStream();
-
-      const choice = completion.choices[0];
-      if (!choice) throw new Error("No completion choice returned");
-
-      const { message, finish_reason } = choice;
-
-      // Convert OpenAI response back to Anthropic message format for storage
-      const anthropicContent: any[] = [];
-      if (message.content) {
-        anthropicContent.push({ type: "text", text: message.content });
-      }
-      if (message.tool_calls) {
-        for (const tc of message.tool_calls as any[]) {
-          anthropicContent.push({
-            type: "tool_use",
-            id: tc.id,
-            name: tc.function.name,
-            input: JSON.parse(tc.function.arguments),
-          });
-        }
-      }
-
-      const response = {
-        id: completion.id,
-        type: "message",
-        role: "assistant",
-        content: anthropicContent,
-        model: completion.model,
-        stop_reason: finish_reason === "tool_calls" ? "tool_use" : "end_turn",
-        stop_sequence: null,
-        usage: {
-          input_tokens: completion.usage?.prompt_tokens ?? 0,
-          output_tokens: completion.usage?.completion_tokens ?? 0,
-        },
-      } as unknown as Message;
-
-      if (finish_reason === "tool_calls" && message.tool_calls) {
-        await this.handleNextTurn(response);
-        continue;
-      }
-
-      // Turn complete
-      if (this.checkStopHook && (await this.checkStopHook(response))) {
-        this.handleStopHookBlocking(response);
-        continue;
-      }
-
-      return { response, messages: this.messages };
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // callOpenAIStream — streaming API call via OpenAI SDK.
-  // -----------------------------------------------------------------------
-
-  private async callOpenAIStream(): Promise<OpenAI.ChatCompletion> {
-    const openaiTools = this.tools?.length
-      ? toOpenAITools(this.tools as unknown as Array<Omit<ToolDef, "deferred">>)
-      : undefined;
-    const openaiMessages = toOpenAIMessages(this.messages, this.system);
-
-    const stream = await this.openaiClient!.chat.completions.create({
-      model: this.model,
-      max_tokens: this.maxTokens,
-      tools: openaiTools,
-      messages: openaiMessages,
-      stream: true,
-      stream_options: { include_usage: true },
-    }, { signal: this.abortController?.signal });
-
-    let content = "";
-    let firstText = true;
-    const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
-    let finishReason = "";
-    let usage: { prompt_tokens: number; completion_tokens: number } | undefined;
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-
-      if (chunk.usage) {
-        usage = {
-          prompt_tokens: chunk.usage.prompt_tokens,
-          completion_tokens: chunk.usage.completion_tokens,
-        };
-      }
-
-      if (!delta) continue;
-
-      if (delta.content) {
-        if (firstText) { this.onText("\n"); firstText = false; }
-        this.onText(delta.content);
-        content += delta.content;
-      }
-
-      // Tool call deltas arrive in fragments, accumulate by index
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const existing = toolCalls.get(tc.index);
-          if (existing) {
-            if (tc.function?.arguments) existing.arguments += tc.function.arguments;
-          } else {
-            toolCalls.set(tc.index, {
-              id: tc.id || "",
-              name: tc.function?.name || "",
-              arguments: tc.function?.arguments || "",
-            });
-          }
-        }
-      }
-
-      if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-    }
-
-    const assembledToolCalls = toolCalls.size > 0
-      ? Array.from(toolCalls.entries())
-          .sort(([a], [b]) => a - b)
-          .map(([_, tc]) => ({
-            id: tc.id,
-            type: "function" as const,
-            function: { name: tc.name, arguments: tc.arguments },
-          }))
-      : undefined;
-
-    return {
-      id: "stream",
-      object: "chat.completion",
-      created: Date.now(),
-      model: this.model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant" as const,
-          content: content || null,
-          tool_calls: assembledToolCalls,
-          refusal: null,
-        },
-        finish_reason: finishReason || "stop",
-        logprobs: null,
-      }],
-      usage: usage
-        ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.prompt_tokens + usage.completion_tokens }
-        : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    } as OpenAI.ChatCompletion;
   }
 
   // -----------------------------------------------------------------------
@@ -573,16 +377,4 @@ export class Agent {
       { role: "user", content: "[System: Your token budget was exhausted. Please continue.]" },
     ];
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function isPromptTooLongError(err: unknown): boolean {
-  if (err instanceof Anthropic.BadRequestError) {
-    const msg = String(err.message).toLowerCase();
-    return msg.includes("prompt is too long") || msg.includes("prompt_too_long");
-  }
-  return false;
 }

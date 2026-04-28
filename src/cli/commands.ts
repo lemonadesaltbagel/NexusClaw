@@ -3,6 +3,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import type { ParsedArgs, PermissionMode } from "@/core/types";
 import { Agent } from "@/core/agent";
+import type { Provider } from "@/core/provider";
+import { AnthropicProvider } from "@/core/providers/anthropic";
+import { OpenAIProvider } from "@/core/providers/openai";
 import { buildSystemPrompt } from "@/core/prompt";
 import { getActiveToolDefinitions } from "@/tools/definitions";
 import { executeTool } from "@/tools/executor";
@@ -21,6 +24,17 @@ function resolveApiKey(apiBase?: string): string | undefined {
   }
   // Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY
   return process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
+}
+
+// ---------------------------------------------------------------------------
+// Provider factory
+// ---------------------------------------------------------------------------
+
+function createProvider(apiKey: string, apiBase?: string): Provider {
+  if (apiBase) {
+    return new OpenAIProvider(new OpenAI({ apiKey, baseURL: apiBase }));
+  }
+  return new AnthropicProvider(new Anthropic({ apiKey }));
 }
 
 // ---------------------------------------------------------------------------
@@ -69,16 +83,8 @@ export const chatCommand = new Command("chat")
       process.exit(1);
     }
 
-    // --- Build clients ---
-    const client = new Anthropic({
-      apiKey,
-      ...(args.apiBase && { baseURL: args.apiBase }),
-    });
-
-    // Create OpenAI client when a custom API base is specified
-    const openaiClient = args.apiBase
-      ? new OpenAI({ apiKey, baseURL: args.apiBase })
-      : undefined;
+    // --- Build provider ---
+    const provider = createProvider(apiKey, args.apiBase);
 
     // --- Build system prompt and tools ---
     const system = buildSystemPrompt();
@@ -86,8 +92,7 @@ export const chatCommand = new Command("chat")
 
     // --- Create agent ---
     const agent = new Agent({
-      client,
-      openaiClient,
+      provider,
       model: args.model,
       system,
       tools,
