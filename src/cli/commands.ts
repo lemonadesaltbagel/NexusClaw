@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import type { ParsedArgs, PermissionMode } from "@/core/types";
 import { Agent } from "@/core/agent";
 import { buildSystemPrompt } from "@/core/prompt";
@@ -68,11 +69,16 @@ export const chatCommand = new Command("chat")
       process.exit(1);
     }
 
-    // --- Build Anthropic client ---
+    // --- Build clients ---
     const client = new Anthropic({
       apiKey,
       ...(args.apiBase && { baseURL: args.apiBase }),
     });
+
+    // Create OpenAI client when a custom API base is specified
+    const openaiClient = args.apiBase
+      ? new OpenAI({ apiKey, baseURL: args.apiBase })
+      : undefined;
 
     // --- Build system prompt and tools ---
     const system = buildSystemPrompt();
@@ -81,6 +87,7 @@ export const chatCommand = new Command("chat")
     // --- Create agent ---
     const agent = new Agent({
       client,
+      openaiClient,
       model: args.model,
       system,
       tools,
