@@ -2,11 +2,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   DEFAULT_MAX_TOKENS,
   ESCALATED_MAX_TOKENS,
+  THINKING_MAX_TOKENS,
   MAX_COMPACT_RETRIES,
   MAX_RECOVERY_RETRIES,
   type Message,
   type MessageParam,
   type QueryResult,
+  type ThinkingMode,
   type ToolUseBlock,
 } from "@/core/types";
 import { saveSession, type SessionData } from "@/core/session";
@@ -39,6 +41,8 @@ export interface AgentOptions {
   onToolResult?: (name: string, result: string) => void;
   /** Stop hook — return true to *block* the turn from completing. */
   checkStopHook?: (response: Message) => Promise<boolean>;
+  /** Extended thinking mode: "disabled" (default), "enabled", or "adaptive". */
+  thinkingMode?: ThinkingMode;
 }
 
 export class Agent {
@@ -56,6 +60,7 @@ export class Agent {
   private onToolCall: (name: string, input: Record<string, unknown>) => void;
   private onToolResult: (name: string, result: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
+  private thinkingMode: ThinkingMode;
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
@@ -66,6 +71,8 @@ export class Agent {
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.system = options.system;
     this.tools = options.tools;
+
+    this.thinkingMode = options.thinkingMode ?? "disabled";
 
     this.executeTool =
       options.executeTool ??
@@ -186,20 +193,49 @@ export class Agent {
       let response: Message;
 
       try {
-        const stream = this.client.messages.stream(
-          {
-            model: this.model,
-            max_tokens: currentMaxTokens,
-            messages: this.messages,
-            ...(this.system !== undefined && { system: this.system }),
-            ...(this.tools?.length && { tools: this.tools }),
-          },
-          { signal: this.abortController?.signal },
-        );
+        const effectiveMaxTokens =
+          this.thinkingMode !== "disabled"
+            ? Math.max(currentMaxTokens, THINKING_MAX_TOKENS)
+            : currentMaxTokens;
+
+        const createParams: Record<string, unknown> = {
+          model: this.model,
+          max_tokens: effectiveMaxTokens,
+          messages: this.messages,
+          ...(this.system !== undefined && { system: this.system }),
+          ...(this.tools?.length && { tools: this.tools }),
+        };
+
+        if (this.thinkingMode === "enabled") {
+          createParams.thinking = { type: "enabled", budget_tokens: effectiveMaxTokens - 1 };
+        } else if (this.thinkingMode === "adaptive") {
+          createParams.thinking = { type: "enabled", budget_tokens: 10_000 };
+        }
+
+        const stream = this.client.messages.stream(createParams as any, {
+          signal: this.abortController?.signal,
+        });
 
         stream.on("text", (delta) => this.onText(delta));
 
-        response = (await stream.finalMessage()) as Message;
+        const finalMessage = await stream.finalMessage();
+
+        // When thinking is active, strip thinking blocks from completed turns
+        // (no tool_use) to avoid wasting context in subsequent turns.
+        // Turns with tool_use must keep thinking blocks — the API requires
+        // the signature for validation when tool_result is sent back.
+        if (this.thinkingMode !== "disabled") {
+          const hasToolUse = finalMessage.content.some(
+            (block: any) => block.type === "tool_use",
+          );
+          if (!hasToolUse) {
+            (finalMessage as any).content = finalMessage.content.filter(
+              (block: any) => block.type !== "thinking",
+            );
+          }
+        }
+
+        response = finalMessage as Message;
       } catch (err: unknown) {
         // ---- Prompt-too-long handling (2-stage, withhold error) ----
         if (isPromptTooLongError(err)) {

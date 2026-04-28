@@ -88,6 +88,7 @@ export const chatCommand = new Command("chat")
       onText: (delta) => process.stdout.write(delta),
       onToolCall: printToolCall,
       onToolResult: printToolResult,
+      thinkingMode: args.thinking ? "enabled" : "disabled",
     });
 
     // --- Resume previous session if requested ---

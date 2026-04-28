@@ -9,6 +9,12 @@ export type TextBlock = Anthropic.Messages.TextBlock;
 export type StopReason = Anthropic.Messages.Message["stop_reason"];
 
 // ---------------------------------------------------------------------------
+// Thinking mode
+// ---------------------------------------------------------------------------
+
+export type ThinkingMode = "disabled" | "enabled" | "adaptive";
+
+// ---------------------------------------------------------------------------
 // Permission modes — controls how tool permissions are handled
 // ---------------------------------------------------------------------------
 
@@ -59,6 +65,7 @@ export interface ToolResult {
 
 export const DEFAULT_MAX_TOKENS = 16_384;
 export const ESCALATED_MAX_TOKENS = 65_536;
+export const THINKING_MAX_TOKENS = 128_000;
 export const MAX_RECOVERY_RETRIES = 3;
 export const MAX_COMPACT_RETRIES = 3;
 
