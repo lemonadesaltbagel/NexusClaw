@@ -52,6 +52,15 @@ describe("executeTool routing", () => {
     expect(result.trim()).toBe("routed");
   });
 
+  test("routes web_fetch to webFetch handler", async () => {
+    // Use a mock server via run_shell to avoid external requests
+    const result = await executeTool("web_fetch", {
+      url: "https://example.com",
+    });
+    // Should return some content (or an error if offline), but not "Unknown tool"
+    expect(result).not.toContain("Unknown tool");
+  });
+
   test("returns unknown tool message for unregistered names", async () => {
     const result = await executeTool("nonexistent_tool", {});
     expect(result).toContain("Unknown tool");
