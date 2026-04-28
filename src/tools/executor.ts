@@ -3,6 +3,8 @@
 // enforces a result size cap (50K chars) to protect context windows.
 // ---------------------------------------------------------------------------
 
+import { resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "@/tools/handlers/read_file";
 import { writeFile } from "@/tools/handlers/write_file";
 import { editFile } from "@/tools/handlers/edit_file";
@@ -10,6 +12,9 @@ import { listFiles } from "@/tools/handlers/list_files";
 import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
+
+/** Tracks mtimeMs for files that have been read — used to enforce read-before-write. */
+export const readFileState = new Map<string, number>();
 
 const MAX_RESULT_CHARS = 50_000;
 
@@ -30,17 +35,54 @@ export async function executeTool(
   let result: string;
 
   switch (name) {
-    case "read_file":
+    case "read_file": {
       result = readFile(input as { file_path: string });
+      if (!result.startsWith("Error")) {
+        const absPath = resolve(input.file_path as string);
+        try { readFileState.set(absPath, statSync(absPath).mtimeMs); } catch {}
+      }
       break;
-    case "write_file":
+    }
+    case "write_file": {
+      const absPath = resolve(input.file_path as string);
+      if (existsSync(absPath)) {
+        if (!readFileState.has(absPath)) {
+          result = "Error: You must read this file before writing. Use read_file first.";
+          break;
+        }
+        const cur = statSync(absPath).mtimeMs;
+        if (cur !== readFileState.get(absPath)!) {
+          readFileState.delete(absPath);
+          result = "Warning: file was modified externally since last read. Please read_file again.";
+          break;
+        }
+      }
       result = writeFile(input as { file_path: string; content: string });
+      if (!result.startsWith("Error")) {
+        try { readFileState.set(absPath, statSync(absPath).mtimeMs); } catch {}
+      }
       break;
-    case "edit_file":
+    }
+    case "edit_file": {
+      const absPath = resolve(input.file_path as string);
+      if (!readFileState.has(absPath)) {
+        result = "Error: You must read this file before editing. Use read_file first.";
+        break;
+      }
+      const cur = statSync(absPath).mtimeMs;
+      if (cur !== readFileState.get(absPath)!) {
+        readFileState.delete(absPath);
+        result = "Warning: file was modified externally since last read. Please read_file again.";
+        break;
+      }
       result = editFile(
         input as { file_path: string; old_string: string; new_string: string },
       );
+      if (!result.startsWith("Error")) {
+        try { readFileState.set(absPath, statSync(absPath).mtimeMs); } catch {}
+      }
       break;
+    }
     case "list_files":
       result = await listFiles(input as { pattern: string; path?: string });
       break;

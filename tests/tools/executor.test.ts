@@ -1,5 +1,5 @@
-import { test, expect, describe } from "bun:test";
-import { executeTool } from "@/tools/executor";
+import { test, expect, describe, beforeEach } from "bun:test";
+import { executeTool, readFileState } from "@/tools/executor";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ const TEST_DIR = join(tmpdir(), `nexuscode-executor-test-${Date.now()}`);
 
 function setup() {
   mkdirSync(TEST_DIR, { recursive: true });
+  readFileState.clear();
 }
 
 function teardown() {
@@ -114,14 +115,100 @@ describe("executeTool truncation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Error propagation from handlers
+// 3. Read-before-write protection
 // ---------------------------------------------------------------------------
 
-describe("executeTool error handling", () => {
-  test("propagates errors from stub handlers as thrown exceptions", async () => {
-    // write_file is a stub that throws "not implemented"
-    await expect(
-      executeTool("write_file", { file_path: "/tmp/x", content: "y" }),
-    ).rejects.toThrow("not implemented");
+describe("read-before-write protection", () => {
+  beforeEach(() => {
+    readFileState.clear();
+  });
+
+  test("write_file blocks if file exists but was never read", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "unread.txt");
+    writeFileSync(filePath, "original");
+
+    const result = await executeTool("write_file", {
+      file_path: filePath,
+      content: "new",
+    });
+    expect(result).toContain("must read this file before writing");
+    teardown();
+  });
+
+  test("edit_file blocks if file was never read", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "unread2.txt");
+    writeFileSync(filePath, "original");
+
+    const result = await executeTool("edit_file", {
+      file_path: filePath,
+      old_string: "original",
+      new_string: "changed",
+    });
+    expect(result).toContain("must read this file before editing");
+    teardown();
+  });
+
+  test("write_file succeeds after read_file", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "readfirst.txt");
+    writeFileSync(filePath, "original");
+
+    await executeTool("read_file", { file_path: filePath });
+    const result = await executeTool("write_file", {
+      file_path: filePath,
+      content: "updated",
+    });
+    expect(result).toContain("Successfully wrote");
+    teardown();
+  });
+
+  test("edit_file succeeds after read_file", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "editafter.txt");
+    writeFileSync(filePath, "original content here");
+
+    await executeTool("read_file", { file_path: filePath });
+    const result = await executeTool("edit_file", {
+      file_path: filePath,
+      old_string: "original",
+      new_string: "modified",
+    });
+    expect(result).toContain("Successfully edited");
+    teardown();
+  });
+
+  test("write_file warns when file was externally modified", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "external.txt");
+    writeFileSync(filePath, "original");
+
+    await executeTool("read_file", { file_path: filePath });
+
+    // Simulate external modification by changing mtime
+    const futureMs = Date.now() + 5000;
+    const futureS = futureMs / 1000;
+    const { utimesSync } = require("node:fs");
+    utimesSync(filePath, futureS, futureS);
+
+    const result = await executeTool("write_file", {
+      file_path: filePath,
+      content: "overwrite",
+    });
+    expect(result).toContain("modified externally");
+    teardown();
+  });
+
+  test("write_file allows creating new files without prior read", async () => {
+    setup();
+    const filePath = join(TEST_DIR, "brand-new.txt");
+
+    const result = await executeTool("write_file", {
+      file_path: filePath,
+      content: "fresh content",
+    });
+    expect(result).toContain("Successfully wrote");
+    teardown();
   });
 });
