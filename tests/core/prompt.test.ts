@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveIncludes } from "@/core/prompt";
+import { resolveIncludes, loadRulesDir } from "@/core/prompt";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -147,6 +147,58 @@ describe("resolveIncludes", () => {
     expect(result).toContain("P");
     expect(result).toContain("C");
     expect(result).toContain("GC");
+    teardown();
+  });
+});
+
+describe("loadRulesDir", () => {
+  test("returns empty string when .claude/rules does not exist", () => {
+    setup();
+    expect(loadRulesDir(TEST_DIR)).toBe("");
+    teardown();
+  });
+
+  test("loads and sorts rule files", () => {
+    setup();
+    const rulesDir = join(TEST_DIR, ".claude", "rules");
+    mkdirSync(rulesDir, { recursive: true });
+    writeFileSync(join(rulesDir, "b-style.md"), "Use tabs");
+    writeFileSync(join(rulesDir, "a-lint.md"), "No warnings");
+
+    const result = loadRulesDir(TEST_DIR);
+    expect(result).toContain("## Rules");
+    expect(result).toContain("<!-- rule: a-lint.md -->");
+    expect(result).toContain("No warnings");
+    expect(result).toContain("<!-- rule: b-style.md -->");
+    expect(result).toContain("Use tabs");
+    // a-lint should appear before b-style (sorted)
+    expect(result.indexOf("a-lint.md")).toBeLessThan(result.indexOf("b-style.md"));
+    teardown();
+  });
+
+  test("ignores non-.md files", () => {
+    setup();
+    const rulesDir = join(TEST_DIR, ".claude", "rules");
+    mkdirSync(rulesDir, { recursive: true });
+    writeFileSync(join(rulesDir, "rule.md"), "valid rule");
+    writeFileSync(join(rulesDir, "notes.txt"), "not a rule");
+
+    const result = loadRulesDir(TEST_DIR);
+    expect(result).toContain("valid rule");
+    expect(result).not.toContain("not a rule");
+    teardown();
+  });
+
+  test("resolves @include directives in rule files", () => {
+    setup();
+    const rulesDir = join(TEST_DIR, ".claude", "rules");
+    mkdirSync(rulesDir, { recursive: true });
+    writeFileSync(join(rulesDir, "shared.md"), "shared content");
+    writeFileSync(join(rulesDir, "main.md"), "before\n@./shared.md\nafter");
+
+    const result = loadRulesDir(TEST_DIR);
+    // main.md's @include should resolve shared.md relative to rulesDir
+    expect(result).toContain("before\nshared content\nafter");
     teardown();
   });
 });

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { join, resolve, dirname } from "path";
 import { execSync } from "child_process";
 import * as os from "os";
@@ -45,9 +45,19 @@ export function resolveIncludes(
 }
 
 /** Load any Markdown rules from `.claude/rules/*.md`. */
-function loadRulesDir(_cwd: string): string {
-  // TODO: implement rules directory loading
-  return "";
+export function loadRulesDir(cwd: string): string {
+  const rulesDir = join(cwd, ".claude", "rules");
+  if (!existsSync(rulesDir)) return "";
+  const files = readdirSync(rulesDir).filter(f => f.endsWith(".md")).sort();
+  const parts: string[] = [];
+  for (const file of files) {
+    try {
+      let content = readFileSync(join(rulesDir, file), "utf-8");
+      content = resolveIncludes(content, rulesDir);
+      parts.push(`<!-- rule: ${file} -->\n${content}`);
+    } catch {}
+  }
+  return parts.length > 0 ? "\n\n## Rules\n" + parts.join("\n\n") : "";
 }
 
 // ---------------------------------------------------------------------------
