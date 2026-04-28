@@ -9,6 +9,32 @@ export type TextBlock = Anthropic.Messages.TextBlock;
 export type StopReason = Anthropic.Messages.Message["stop_reason"];
 
 // ---------------------------------------------------------------------------
+// Permission modes — controls how tool permissions are handled
+// ---------------------------------------------------------------------------
+
+export type PermissionMode =
+  | "default"
+  | "plan"
+  | "acceptEdits"
+  | "dontAsk"
+  | "bypassPermissions";
+
+// ---------------------------------------------------------------------------
+// Parsed CLI arguments
+// ---------------------------------------------------------------------------
+
+export interface ParsedArgs {
+  permissionMode: PermissionMode;
+  model: string;
+  apiBase?: string;
+  resume: boolean;
+  thinking: boolean;
+  maxCost?: number;
+  maxTurns?: number;
+  prompt?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Query result — final return value of a completed turn
 // ---------------------------------------------------------------------------
 

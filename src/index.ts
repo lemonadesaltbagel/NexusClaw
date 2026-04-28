@@ -7,6 +7,6 @@ program
   .description("A coding agent CLI powered by Claude")
   .version("0.1.0");
 
-program.addCommand(chatCommand);
+program.addCommand(chatCommand, { isDefault: true });
 
 program.parse();

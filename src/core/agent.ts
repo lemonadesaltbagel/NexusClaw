@@ -74,6 +74,11 @@ export class Agent {
     return this.messages;
   }
 
+  /** Clear conversation history (used by REPL /clear command). */
+  clearMessages(): void {
+    this.messages = [];
+  }
+
   /** High-level entry point: runs one full turn with abort support. */
   async chat(userMessage: string): Promise<void> {
     this.abortController = new AbortController();
