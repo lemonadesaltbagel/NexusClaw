@@ -13,6 +13,7 @@ import {
 import { saveSession } from "@/core/session";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
+import { withRetry } from "@/core/retry";
 
 // ---------------------------------------------------------------------------
 // Agent — single-class orchestrator for a conversational coding agent.
@@ -40,6 +41,8 @@ export interface AgentOptions {
   onToolCall?: (name: string, input: Record<string, unknown>) => void;
   /** Called after a tool finishes with its result string. */
   onToolResult?: (name: string, result: string) => void;
+  /** Called when a transient API error triggers a retry. */
+  onRetry?: (attempt: number, maxRetries: number, reason: string) => void;
   /** Stop hook — return true to *block* the turn from completing. */
   checkStopHook?: (response: Message) => Promise<boolean>;
   /** Extended thinking mode: "disabled" (default), "enabled", or "adaptive". */
@@ -60,6 +63,7 @@ export class Agent {
   private onText: (delta: string) => void;
   private onToolCall: (name: string, input: Record<string, unknown>) => void;
   private onToolResult: (name: string, result: string) => void;
+  private onRetry: (attempt: number, maxRetries: number, reason: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
   private thinkingMode: ThinkingMode;
   private abortController: AbortController | null = null;
@@ -85,6 +89,7 @@ export class Agent {
     this.onText = options.onText ?? (() => {});
     this.onToolCall = options.onToolCall ?? (() => {});
     this.onToolResult = options.onToolResult ?? (() => {});
+    this.onRetry = options.onRetry ?? (() => {});
     this.checkStopHook = options.checkStopHook;
   }
 
@@ -195,16 +200,22 @@ export class Agent {
       let response: Message;
 
       try {
-        response = await this.provider.createMessage({
-          model: this.model,
-          maxTokens: currentMaxTokens,
-          messages: this.messages,
-          system: this.system,
-          tools: this.tools,
-          thinkingMode: this.thinkingMode,
-          signal: this.abortController?.signal,
-          onText: (delta) => this.onText(delta),
-        });
+        response = await withRetry(
+          (signal) =>
+            this.provider.createMessage({
+              model: this.model,
+              maxTokens: currentMaxTokens,
+              messages: this.messages,
+              system: this.system,
+              tools: this.tools,
+              thinkingMode: this.thinkingMode,
+              signal,
+              onText: (delta) => this.onText(delta),
+            }),
+          this.abortController?.signal,
+          3,
+          this.onRetry,
+        );
       } catch (err: unknown) {
         // ---- Prompt-too-long handling (2-stage, withhold error) ----
         if (isPromptTooLongError(err)) {

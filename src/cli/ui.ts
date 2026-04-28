@@ -53,6 +53,10 @@ export function printToolCall(name: string, input: Record<string, unknown>): voi
   console.log(chalk.yellow(`\n  ${icon} ${name}`) + chalk.gray(` ${summary}`));
 }
 
+export function printRetry(attempt: number, maxRetries: number, reason: string): void {
+  console.log(chalk.yellow(`  ⟳ Retrying (${attempt}/${maxRetries}) — ${reason}`));
+}
+
 export function printToolResult(name: string, result: string): void {
   const maxLen = 500;
   const truncated =

@@ -11,7 +11,7 @@ import { getActiveToolDefinitions } from "@/tools/definitions";
 import { executeTool } from "@/tools/executor";
 import { runRepl } from "@/cli/repl";
 import { getLatestSessionId, loadSession } from "@/core/session";
-import { printToolCall, printToolResult } from "@/cli/ui";
+import { printToolCall, printToolResult, printRetry } from "@/cli/ui";
 
 // ---------------------------------------------------------------------------
 // API key resolution
@@ -100,6 +100,7 @@ export const chatCommand = new Command("chat")
       onText: (delta) => process.stdout.write(delta),
       onToolCall: printToolCall,
       onToolResult: printToolResult,
+      onRetry: printRetry,
       thinkingMode: args.thinking ? "enabled" : "disabled",
     });
 

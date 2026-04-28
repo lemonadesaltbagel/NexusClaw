@@ -311,13 +311,13 @@ describe("prompt too long recovery", () => {
     await expect(agent.chat("Huge")).rejects.toThrow("prompt is too long");
   });
 
-  test("non-PTL errors propagate immediately", async () => {
+  test("non-PTL, non-retryable errors propagate immediately", async () => {
     const provider: Provider = {
-      createMessage: async () => { throw new Error("network failure"); },
+      createMessage: async () => { throw new Error("invalid request"); },
     };
 
     const agent = new Agent({ provider });
-    await expect(agent.chat("Msg")).rejects.toThrow("network failure");
+    await expect(agent.chat("Msg")).rejects.toThrow("invalid request");
   });
 });
 
