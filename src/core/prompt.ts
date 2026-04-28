@@ -1,3 +1,112 @@
+import { readFileSync, existsSync } from "fs";
+import { join, resolve } from "path";
+import { execSync } from "child_process";
+import * as os from "os";
+import { buildMemoryPromptSection } from "./memory.js";
+import { buildSkillDescriptions } from "./skills.js";
+import { buildAgentDescriptions } from "./subagent.js";
+import { getDeferredToolNames } from "../tools/definitions.js";
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md helpers (stubs — implementation deferred)
+// ---------------------------------------------------------------------------
+
+/** Resolve `@include` directives inside a CLAUDE.md file. */
+function resolveIncludes(content: string, _dir: string): string {
+  // TODO: implement @include resolution
+  return content;
+}
+
+/** Load any Markdown rules from `.claude/rules/*.md`. */
+function loadRulesDir(_cwd: string): string {
+  // TODO: implement rules directory loading
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md loader
+// ---------------------------------------------------------------------------
+
+export function loadClaudeMd(): string {
+  const parts: string[] = [];
+  let dir = process.cwd();
+  while (true) {
+    const file = join(dir, "CLAUDE.md");
+    if (existsSync(file)) {
+      try {
+        let content = readFileSync(file, "utf-8");
+        content = resolveIncludes(content, dir);
+        parts.unshift(content);
+      } catch {}
+    }
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const rules = loadRulesDir(process.cwd());
+  const claudeMd =
+    parts.length > 0
+      ? "\n\n# Project Instructions (CLAUDE.md)\n" + parts.join("\n\n---\n\n")
+      : "";
+  return claudeMd + rules;
+}
+
+// ---------------------------------------------------------------------------
+// Git context
+// ---------------------------------------------------------------------------
+
+export function getGitContext(): string {
+  try {
+    const opts = { encoding: "utf-8" as const, timeout: 3000 };
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", opts).trim();
+    const log = execSync("git log --oneline -5", opts).trim();
+    const status = execSync("git status --short", opts).trim();
+    let result = `\nGit branch: ${branch}`;
+    if (log) result += `\nRecent commits:\n${log}`;
+    if (status) result += `\nGit status:\n${status}`;
+    return result;
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// System prompt builder
+// ---------------------------------------------------------------------------
+
+export function buildSystemPrompt(): string {
+  const date = new Date().toISOString().split("T")[0];
+  const platform = `${os.platform()} ${os.arch()}`;
+  const shell =
+    process.platform === "win32"
+      ? process.env.ComSpec || "cmd.exe"
+      : process.env.SHELL || "/bin/sh";
+
+  return SYSTEM_PROMPT_TEMPLATE
+    .split("{{cwd}}")
+    .join(process.cwd())
+    .split("{{date}}")
+    .join(date)
+    .split("{{platform}}")
+    .join(platform)
+    .split("{{shell}}")
+    .join(shell)
+    .split("{{git_context}}")
+    .join(getGitContext())
+    .split("{{claude_md}}")
+    .join(loadClaudeMd())
+    .split("{{memory}}")
+    .join(buildMemoryPromptSection())
+    .split("{{skills}}")
+    .join(buildSkillDescriptions())
+    .split("{{agents}}")
+    .join(buildAgentDescriptions());
+}
+
+// ---------------------------------------------------------------------------
+// System prompt template
+// ---------------------------------------------------------------------------
+
 export const SYSTEM_PROMPT_TEMPLATE = `You are NexusCode, a lightweight coding assistant CLI.
 You are an interactive agent that helps users with software engineering tasks.
 
