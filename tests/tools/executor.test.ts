@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import { executeTool, readFileState } from "@/tools/executor";
+import { activatedTools, toolDefinitions } from "@/tools/definitions";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -210,5 +211,59 @@ describe("read-before-write protection", () => {
     });
     expect(result).toContain("Successfully wrote");
     teardown();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. tool_search execution
+// ---------------------------------------------------------------------------
+
+describe("executeTool tool_search", () => {
+  beforeEach(() => {
+    activatedTools.clear();
+  });
+
+  test("returns 'no matching' when no deferred tools match query", async () => {
+    const result = await executeTool("tool_search", {
+      query: "zzz_nonexistent_zzz",
+    });
+    expect(result).toContain("No matching deferred tools found");
+  });
+
+  test("activates matching deferred tools and returns their schemas", async () => {
+    // Mark a tool as deferred for testing
+    const target = toolDefinitions.find((t) => t.name === "web_fetch")!;
+    const origDeferred = target.deferred;
+    target.deferred = true;
+
+    try {
+      expect(activatedTools.has("web_fetch")).toBe(false);
+
+      const result = await executeTool("tool_search", { query: "web_fetch" });
+      const parsed = JSON.parse(result);
+
+      expect(parsed).toBeArrayOfSize(1);
+      expect(parsed[0].name).toBe("web_fetch");
+      expect(parsed[0].input_schema).toBeDefined();
+      expect(activatedTools.has("web_fetch")).toBe(true);
+    } finally {
+      target.deferred = origDeferred;
+      activatedTools.delete("web_fetch");
+    }
+  });
+
+  test("matches deferred tools by description keyword", async () => {
+    const target = toolDefinitions.find((t) => t.name === "web_fetch")!;
+    const origDeferred = target.deferred;
+    target.deferred = true;
+
+    try {
+      const result = await executeTool("tool_search", { query: "url" });
+      const parsed = JSON.parse(result);
+      expect(parsed.some((t: any) => t.name === "web_fetch")).toBe(true);
+    } finally {
+      target.deferred = origDeferred;
+      activatedTools.delete("web_fetch");
+    }
   });
 });

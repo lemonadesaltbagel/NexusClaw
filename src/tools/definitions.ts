@@ -11,6 +11,8 @@ export interface ToolDef {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  /** When true, the tool's full schema is withheld until activated via tool_search. */
+  deferred?: boolean;
 }
 
 export const toolDefinitions: ToolDef[] = [
@@ -155,4 +157,52 @@ export const toolDefinitions: ToolDef[] = [
       required: ["command"],
     },
   },
+  {
+    name: "tool_search",
+    description:
+      "Search for available tools by name or keyword. Returns full schemas for matching deferred tools and activates them for use.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Tool name or search keywords",
+        },
+      },
+      required: ["query"],
+    },
+  },
 ];
+
+// ---------------------------------------------------------------------------
+// Deferred tool activation
+// ---------------------------------------------------------------------------
+
+/** Set of deferred tool names that have been activated via tool_search. */
+export const activatedTools = new Set<string>();
+
+/**
+ * Returns tool definitions suitable for sending to the API.
+ * Deferred tools are excluded unless they have been activated.
+ * The `deferred` field is stripped from the output.
+ */
+export function getActiveToolDefinitions(
+  allTools?: ToolDef[],
+): Omit<ToolDef, "deferred">[] {
+  const tools = allTools ?? toolDefinitions;
+  return tools
+    .filter((t) => !t.deferred || activatedTools.has(t.name))
+    .map(({ deferred: _, ...rest }) => rest);
+}
+
+/**
+ * Returns the names of deferred tools that have NOT yet been activated.
+ * Useful for prompt engineering — lets the system prompt list available
+ * deferred tools so the model knows what it can search for.
+ */
+export function getDeferredToolNames(allTools?: ToolDef[]): string[] {
+  const tools = allTools ?? toolDefinitions;
+  return tools
+    .filter((t) => t.deferred && !activatedTools.has(t.name))
+    .map((t) => t.name);
+}

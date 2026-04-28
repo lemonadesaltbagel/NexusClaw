@@ -1,5 +1,11 @@
-import { test, expect, describe } from "bun:test";
-import { toolDefinitions, type ToolDef } from "@/tools/definitions";
+import { test, expect, describe, beforeEach } from "bun:test";
+import {
+  toolDefinitions,
+  activatedTools,
+  getActiveToolDefinitions,
+  getDeferredToolNames,
+  type ToolDef,
+} from "@/tools/definitions";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — structure validation
@@ -37,6 +43,7 @@ describe("toolDefinitions", () => {
     expect(names).toContain("list_files");
     expect(names).toContain("grep_search");
     expect(names).toContain("run_shell");
+    expect(names).toContain("tool_search");
   });
 
   test("required fields reference existing properties", () => {
@@ -47,5 +54,95 @@ describe("toolDefinitions", () => {
         }
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferred tool activation
+// ---------------------------------------------------------------------------
+
+describe("getActiveToolDefinitions", () => {
+  beforeEach(() => {
+    activatedTools.clear();
+  });
+
+  const sampleTools: ToolDef[] = [
+    {
+      name: "always_on",
+      description: "Always available",
+      input_schema: { type: "object", properties: {} },
+    },
+    {
+      name: "lazy_tool",
+      description: "Only when needed",
+      input_schema: { type: "object", properties: {} },
+      deferred: true,
+    },
+  ];
+
+  test("excludes deferred tools by default", () => {
+    const active = getActiveToolDefinitions(sampleTools);
+    const names = active.map((t) => t.name);
+    expect(names).toContain("always_on");
+    expect(names).not.toContain("lazy_tool");
+  });
+
+  test("includes deferred tools once activated", () => {
+    activatedTools.add("lazy_tool");
+    const active = getActiveToolDefinitions(sampleTools);
+    const names = active.map((t) => t.name);
+    expect(names).toContain("lazy_tool");
+  });
+
+  test("strips the deferred field from output", () => {
+    activatedTools.add("lazy_tool");
+    const active = getActiveToolDefinitions(sampleTools);
+    for (const t of active) {
+      expect(t).not.toHaveProperty("deferred");
+    }
+  });
+});
+
+describe("getDeferredToolNames", () => {
+  beforeEach(() => {
+    activatedTools.clear();
+  });
+
+  const sampleTools: ToolDef[] = [
+    {
+      name: "normal",
+      description: "Normal tool",
+      input_schema: { type: "object", properties: {} },
+    },
+    {
+      name: "deferred_a",
+      description: "Deferred A",
+      input_schema: { type: "object", properties: {} },
+      deferred: true,
+    },
+    {
+      name: "deferred_b",
+      description: "Deferred B",
+      input_schema: { type: "object", properties: {} },
+      deferred: true,
+    },
+  ];
+
+  test("returns names of all unactivated deferred tools", () => {
+    const names = getDeferredToolNames(sampleTools);
+    expect(names).toEqual(["deferred_a", "deferred_b"]);
+  });
+
+  test("excludes activated deferred tools", () => {
+    activatedTools.add("deferred_a");
+    const names = getDeferredToolNames(sampleTools);
+    expect(names).toEqual(["deferred_b"]);
+  });
+
+  test("returns empty array when all deferred tools are activated", () => {
+    activatedTools.add("deferred_a");
+    activatedTools.add("deferred_b");
+    const names = getDeferredToolNames(sampleTools);
+    expect(names).toEqual([]);
   });
 });

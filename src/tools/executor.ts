@@ -12,6 +12,7 @@ import { listFiles } from "@/tools/handlers/list_files";
 import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
+import { toolDefinitions, activatedTools } from "@/tools/definitions";
 
 /** Tracks mtimeMs for files that have been read — used to enforce read-before-write. */
 export const readFileState = new Map<string, number>();
@@ -97,6 +98,30 @@ export async function executeTool(
     case "web_fetch":
       result = await webFetch(input as { url: string; max_length?: number });
       break;
+    case "tool_search": {
+      const query = ((input.query as string) || "").toLowerCase();
+      const deferred = toolDefinitions.filter((t) => t.deferred);
+      const matches = deferred.filter(
+        (t) =>
+          t.name.toLowerCase().includes(query) ||
+          (t.description || "").toLowerCase().includes(query),
+      );
+      if (matches.length === 0) {
+        result = "No matching deferred tools found.";
+        break;
+      }
+      for (const m of matches) activatedTools.add(m.name);
+      result = JSON.stringify(
+        matches.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.input_schema,
+        })),
+        null,
+        2,
+      );
+      break;
+    }
     default:
       return `Unknown tool: ${name}`;
   }
