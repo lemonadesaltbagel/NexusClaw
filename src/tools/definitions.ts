@@ -118,6 +118,25 @@ export const toolDefinitions: ToolDef[] = [
     },
   },
   {
+    name: "web_fetch",
+    description:
+      "Fetch a URL and return its content as text. For HTML pages, tags are stripped.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        url: {
+          type: "string",
+          description: "The URL to fetch",
+        },
+        max_length: {
+          type: "number",
+          description: "Maximum content length (default 50000)",
+        },
+      },
+      required: ["url"],
+    },
+  },
+  {
     name: "run_shell",
     description:
       "Execute a shell command and return its output. Use this for running tests, installing packages, git operations, etc.",

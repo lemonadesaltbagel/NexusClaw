@@ -9,6 +9,7 @@ import { editFile } from "@/tools/handlers/edit_file";
 import { listFiles } from "@/tools/handlers/list_files";
 import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
+import { webFetch } from "@/tools/handlers/web_fetch";
 
 const MAX_RESULT_CHARS = 50_000;
 
@@ -50,6 +51,9 @@ export async function executeTool(
       break;
     case "run_shell":
       result = runShell(input as { command: string; timeout?: number });
+      break;
+    case "web_fetch":
+      result = await webFetch(input as { url: string; max_length?: number });
       break;
     default:
       return `Unknown tool: ${name}`;
