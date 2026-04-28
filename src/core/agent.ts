@@ -6,6 +6,7 @@ import {
   MAX_RECOVERY_RETRIES,
   type Message,
   type MessageParam,
+  type PermissionResult,
   type QueryResult,
   type ThinkingMode,
   type ToolUseBlock,
@@ -47,6 +48,13 @@ export interface AgentOptions {
   checkStopHook?: (response: Message) => Promise<boolean>;
   /** Extended thinking mode: "disabled" (default), "enabled", or "adaptive". */
   thinkingMode?: ThinkingMode;
+  /** Set of tool names that are safe to execute concurrently during streaming. */
+  concurrencySafeTools?: Set<string>;
+  /** Check whether a tool invocation is permitted without user interaction. */
+  checkPermission?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => PermissionResult;
 }
 
 export class Agent {
@@ -66,6 +74,8 @@ export class Agent {
   private onRetry: (attempt: number, maxRetries: number, reason: string) => void;
   private checkStopHook?: AgentOptions["checkStopHook"];
   private thinkingMode: ThinkingMode;
+  private concurrencySafeTools: Set<string>;
+  private checkPermission?: AgentOptions["checkPermission"];
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
@@ -78,6 +88,8 @@ export class Agent {
     this.tools = options.tools;
 
     this.thinkingMode = options.thinkingMode ?? "disabled";
+    this.concurrencySafeTools = options.concurrencySafeTools ?? new Set();
+    this.checkPermission = options.checkPermission;
 
     this.executeTool =
       options.executeTool ??
@@ -199,6 +211,9 @@ export class Agent {
       // ----- API call -----
       let response: Message;
 
+      // Track tools executed early during streaming
+      const earlyExecutions = new Map<string, Promise<string>>();
+
       try {
         response = await withRetry(
           (signal) =>
@@ -211,6 +226,17 @@ export class Agent {
               thinkingMode: this.thinkingMode,
               signal,
               onText: (delta) => this.onText(delta),
+              onToolUse: (block) => {
+                if (this.concurrencySafeTools.has(block.name)) {
+                  const perm = this.checkPermission?.(block.name, block.input);
+                  if (!perm || perm.behavior === "allow") {
+                    earlyExecutions.set(
+                      block.id,
+                      this.executeTool(block.name, block.input),
+                    );
+                  }
+                }
+              },
             }),
           this.abortController?.signal,
           3,
@@ -248,7 +274,7 @@ export class Agent {
       switch (response.stop_reason) {
         // ---- tool_use: model wants to use a tool ----
         case "tool_use": {
-          await this.handleNextTurn(response);
+          await this.handleNextTurn(response, earlyExecutions);
           collapseAttempted = false; // reset PTL stage for new sub-turn
           continue;
         }
@@ -299,8 +325,11 @@ export class Agent {
   // Recovery & continuation handlers
   // -----------------------------------------------------------------------
 
-  /** Execute tools serially, append assistant message + tool results. */
-  private async handleNextTurn(response: Message): Promise<void> {
+  /** Execute tools, append assistant message + tool results. Uses early executions when available. */
+  private async handleNextTurn(
+    response: Message,
+    earlyExecutions: Map<string, Promise<string>>,
+  ): Promise<void> {
     const toolBlocks = response.content.filter(
       (b): b is ToolUseBlock => b.type === "tool_use",
     );
@@ -315,7 +344,12 @@ export class Agent {
 
       let content: string;
       try {
-        content = await this.executeTool(block.name, toolInput);
+        const earlyPromise = earlyExecutions.get(block.id);
+        if (earlyPromise) {
+          content = await earlyPromise;
+        } else {
+          content = await this.executeTool(block.name, toolInput);
+        }
       } catch (err) {
         content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
       }

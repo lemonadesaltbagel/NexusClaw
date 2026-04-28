@@ -24,6 +24,7 @@ export class AnthropicProvider implements Provider {
       thinkingMode,
       signal,
       onText,
+      onToolUse,
     } = params;
 
     const effectiveMaxTokens =
@@ -53,6 +54,18 @@ export class AnthropicProvider implements Provider {
     });
 
     stream.on("text", (delta) => onText?.(delta));
+
+    if (onToolUse) {
+      stream.on("contentBlock", (block: any) => {
+        if (block.type === "tool_use") {
+          onToolUse({
+            id: block.id,
+            name: block.name,
+            input: block.input as Record<string, unknown>,
+          });
+        }
+      });
+    }
 
     const finalMessage = await stream.finalMessage();
 

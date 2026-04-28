@@ -21,6 +21,8 @@ export interface StreamParams {
   thinkingMode: ThinkingMode;
   signal?: AbortSignal;
   onText?: (delta: string) => void;
+  /** Called when a tool_use block completes during streaming (before the full response is assembled). */
+  onToolUse?: (block: { id: string; name: string; input: Record<string, unknown> }) => void;
 }
 
 // ---------------------------------------------------------------------------
