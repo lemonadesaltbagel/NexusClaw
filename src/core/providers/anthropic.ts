@@ -56,13 +56,44 @@ export class AnthropicProvider implements Provider {
     stream.on("text", (delta) => onText?.(delta));
 
     if (onToolUse) {
-      stream.on("contentBlock", (block: any) => {
-        if (block.type === "tool_use") {
-          onToolUse({
-            id: block.id,
-            name: block.name,
-            input: block.input as Record<string, unknown>,
+      const toolBlocksByIndex = new Map<
+        number,
+        { id: string; name: string; inputJson: string }
+      >();
+
+      stream.on("streamEvent" as any, (event: any) => {
+        if (
+          event.type === "content_block_start" &&
+          event.content_block?.type === "tool_use"
+        ) {
+          toolBlocksByIndex.set(event.index, {
+            id: event.content_block.id,
+            name: event.content_block.name,
+            inputJson: "",
           });
+        }
+        if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "input_json_delta"
+        ) {
+          const tracked = toolBlocksByIndex.get(event.index);
+          if (tracked) tracked.inputJson += event.delta.partial_json;
+        }
+        if (event.type === "content_block_stop") {
+          const tracked = toolBlocksByIndex.get(event.index);
+          if (tracked) {
+            try {
+              const input = JSON.parse(tracked.inputJson);
+              onToolUse({
+                id: tracked.id,
+                name: tracked.name,
+                input,
+              });
+            } catch {
+              // malformed JSON — skip early dispatch; finalMessage will still contain the block
+            }
+            toolBlocksByIndex.delete(event.index);
+          }
         }
       });
     }

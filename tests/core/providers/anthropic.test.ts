@@ -24,15 +24,31 @@ function makeMessage(
   };
 }
 
-function fakeStream(msg: Message, opts?: { textDeltas?: string[] }) {
-  let textCb: ((delta: string) => void) | null = null;
+interface StreamEvent {
+  type: string;
+  index?: number;
+  content_block?: { type: string; id?: string; name?: string };
+  delta?: { type: string; partial_json?: string };
+}
+
+function fakeStream(
+  msg: Message,
+  opts?: { textDeltas?: string[]; streamEvents?: StreamEvent[] },
+) {
+  const listeners = new Map<string, ((...args: any[]) => void)[]>();
   return {
-    on(event: string, cb: (delta: string) => void) {
-      if (event === "text") textCb = cb;
+    on(event: string, cb: (...args: any[]) => void) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event)!.push(cb);
     },
     async finalMessage() {
-      if (opts?.textDeltas && textCb) {
-        for (const d of opts.textDeltas) textCb(d);
+      const textCbs = listeners.get("text") ?? [];
+      if (opts?.textDeltas) {
+        for (const d of opts.textDeltas) textCbs.forEach((cb) => cb(d));
+      }
+      const streamEventCbs = listeners.get("streamEvent") ?? [];
+      if (opts?.streamEvents) {
+        for (const e of opts.streamEvents) streamEventCbs.forEach((cb) => cb(e));
       }
       return msg;
     },
@@ -169,6 +185,143 @@ describe("AnthropicProvider streaming", () => {
     await provider.createMessage(baseParams({ onText: (d) => deltas.push(d) }));
 
     expect(deltas).toEqual(["Hel", "lo"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool block tracking via streamEvent
+// ---------------------------------------------------------------------------
+
+describe("AnthropicProvider tool block tracking", () => {
+  test("onToolUse fires for each completed tool block with parsed input", async () => {
+    const msg = makeMessage({
+      stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+      ],
+    });
+
+    const streamEvents: StreamEvent[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "read_file" } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path"' } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: ': "a.txt"}' } },
+      { type: "content_block_stop", index: 0 },
+    ];
+
+    const client = mockClient(() => fakeStream(msg, { streamEvents }));
+    const received: { id: string; name: string; input: Record<string, unknown> }[] = [];
+
+    const provider = new AnthropicProvider(client);
+    await provider.createMessage(
+      baseParams({ onToolUse: (block) => received.push(block) }),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({
+      id: "tu_1",
+      name: "read_file",
+      input: { path: "a.txt" },
+    });
+  });
+
+  test("tracks multiple tool blocks independently", async () => {
+    const msg = makeMessage({
+      stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        { type: "tool_use", id: "tu_2", name: "write_file", input: { path: "b.txt", content: "hi" } },
+      ],
+    });
+
+    const streamEvents: StreamEvent[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "read_file" } },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tu_2", name: "write_file" } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path": "a.txt"}' } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"path": "b.txt"' } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: ', "content": "hi"}' } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_stop", index: 1 },
+    ];
+
+    const client = mockClient(() => fakeStream(msg, { streamEvents }));
+    const received: { id: string; name: string; input: Record<string, unknown> }[] = [];
+
+    const provider = new AnthropicProvider(client);
+    await provider.createMessage(
+      baseParams({ onToolUse: (block) => received.push(block) }),
+    );
+
+    expect(received).toHaveLength(2);
+    expect(received[0]).toEqual({ id: "tu_1", name: "read_file", input: { path: "a.txt" } });
+    expect(received[1]).toEqual({ id: "tu_2", name: "write_file", input: { path: "b.txt", content: "hi" } });
+  });
+
+  test("skips tool block with malformed JSON without throwing", async () => {
+    const msg = makeMessage({
+      stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+      ],
+    });
+
+    const streamEvents: StreamEvent[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "read_file" } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path": ' } },
+      // missing closing brace — malformed JSON
+      { type: "content_block_stop", index: 0 },
+    ];
+
+    const client = mockClient(() => fakeStream(msg, { streamEvents }));
+    const received: { id: string; name: string; input: Record<string, unknown> }[] = [];
+
+    const provider = new AnthropicProvider(client);
+    // Should not throw
+    await provider.createMessage(
+      baseParams({ onToolUse: (block) => received.push(block) }),
+    );
+
+    expect(received).toHaveLength(0);
+  });
+
+  test("ignores non-tool content blocks in streamEvent tracking", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+
+    const streamEvents: StreamEvent[] = [
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta" } },
+      { type: "content_block_stop", index: 0 },
+    ];
+
+    const client = mockClient(() => fakeStream(msg, { streamEvents }));
+    const received: { id: string; name: string; input: Record<string, unknown> }[] = [];
+
+    const provider = new AnthropicProvider(client);
+    await provider.createMessage(
+      baseParams({ onToolUse: (block) => received.push(block) }),
+    );
+
+    expect(received).toHaveLength(0);
+  });
+
+  test("does not register streamEvent listener when onToolUse is not provided", async () => {
+    const msg = makeMessage({ stop_reason: "end_turn" });
+    let registeredEvents: string[] = [];
+
+    const client = mockClient(() => {
+      const s = fakeStream(msg);
+      const origOn = s.on.bind(s);
+      s.on = (event: string, cb: any) => {
+        registeredEvents.push(event);
+        return origOn(event, cb);
+      };
+      return s;
+    });
+
+    const provider = new AnthropicProvider(client);
+    await provider.createMessage(baseParams());
+
+    expect(registeredEvents).toContain("text");
+    expect(registeredEvents).not.toContain("streamEvent");
   });
 });
 
