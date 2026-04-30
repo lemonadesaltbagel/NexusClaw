@@ -24,6 +24,7 @@ import { withRetry } from "@/core/retry";
 const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
 const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
 const KEEP_RECENT_RESULTS = 3;
+const MICROCOMPACT_IDLE_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Agent — single-class orchestrator for a conversational coding agent.
@@ -100,6 +101,7 @@ export class Agent {
   private sessionStartTime: string = new Date().toISOString();
   private lastInputTokenCount = 0;
   private effectiveWindow = 200_000;
+  private lastApiCallTime: number | null = null;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -234,6 +236,7 @@ export class Agent {
 
     while (true) {
       // ----- Trim history if context pressure is high -----
+      this.microcompact();
       this.budgetToolResults();
       this.snipStaleResults();
 
@@ -301,6 +304,7 @@ export class Agent {
 
       // Track input token usage for context pressure budgeting
       this.lastInputTokenCount = response.usage?.input_tokens ?? 0;
+      this.lastApiCallTime = Date.now();
 
       // ----- Dispatch on stop_reason -----
       switch (response.stop_reason) {
@@ -635,6 +639,38 @@ export class Agent {
 
       if (shouldSnip) {
         r.block.content = SNIP_PLACEHOLDER;
+      }
+    }
+  }
+
+  /** Clear old tool_result content after an idle period (≥5 min since last API call).
+   *  Keeps the most recent KEEP_RECENT_RESULTS entries intact. */
+  private microcompact(): void {
+    if (
+      !this.lastApiCallTime ||
+      Date.now() - this.lastApiCallTime < MICROCOMPACT_IDLE_MS
+    ) {
+      return;
+    }
+
+    // Collect all tool_result blocks in message order
+    const allResults: any[] = [];
+    for (const msg of this.messages) {
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (const block of msg.content) {
+        const b = block as any;
+        if (b.type === "tool_result" && typeof b.content === "string") {
+          allResults.push(b);
+        }
+      }
+    }
+
+    // Protect the most recent entries
+    const protectedSet = new Set(allResults.slice(-KEEP_RECENT_RESULTS));
+
+    for (const block of allResults) {
+      if (!protectedSet.has(block)) {
+        block.content = "[Old result cleared]";
       }
     }
   }
