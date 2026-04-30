@@ -21,6 +21,10 @@ import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
 
+const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
+const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
+const KEEP_RECENT_RESULTS = 3;
+
 // ---------------------------------------------------------------------------
 // Agent — single-class orchestrator for a conversational coding agent.
 //
@@ -229,8 +233,9 @@ export class Agent {
     let withheldError: unknown = null;
 
     while (true) {
-      // ----- Budget tool results if context pressure is high -----
+      // ----- Trim history if context pressure is high -----
       this.budgetToolResults();
+      this.snipStaleResults();
 
       // ----- API call -----
       let response: Message;
@@ -528,6 +533,108 @@ export class Agent {
             `\n\n[... budgeted: ${block.content.length - keepEach * 2} chars truncated ...]\n\n` +
             block.content.slice(-keepEach);
         }
+      }
+    }
+  }
+
+  /**
+   * Snip stale tool results when context pressure exceeds 60%.
+   *
+   * - read_file: if the same file was read multiple times, keep only the latest.
+   * - grep_search / list_files / run_shell: keep the 3 most recent per type.
+   * - The 3 most recent tool_result entries (any type) are always preserved.
+   *
+   * Only tool_result content is replaced; the corresponding tool_use block
+   * stays intact so the model retains metadata about what it did.
+   */
+  private snipStaleResults(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization <= 0.6) return;
+
+    // Build tool_use_id → { name, input } from assistant messages
+    const toolUseMap = new Map<
+      string,
+      { name: string; input: Record<string, unknown> }
+    >();
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const block of msg.content) {
+        const b = block as any;
+        if (b.type === "tool_use") {
+          toolUseMap.set(b.id, { name: b.name, input: b.input ?? {} });
+        }
+      }
+    }
+
+    // Collect every tool_result block in message order (mutable refs)
+    type ResultRef = {
+      block: any;
+      toolName: string;
+      input: Record<string, unknown>;
+    };
+    const allResults: ResultRef[] = [];
+    for (const msg of this.messages) {
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (const block of msg.content) {
+        const b = block as any;
+        if (b.type === "tool_result") {
+          const meta = toolUseMap.get(b.tool_use_id);
+          allResults.push({
+            block: b,
+            toolName: meta?.name ?? "",
+            input: meta?.input ?? {},
+          });
+        }
+      }
+    }
+
+    // The N most recent tool_result entries are unconditionally protected
+    const protectedSet = new Set(allResults.slice(-KEEP_RECENT_RESULTS));
+
+    // ---- read_file dedup: keep only the latest read per file_path ----
+    // Find the latest read per path across ALL entries (including protected)
+    const latestReadByPath = new Map<string, ResultRef>();
+    for (const r of allResults) {
+      if (r.toolName === "read_file") {
+        latestReadByPath.set((r.input.file_path as string) ?? "", r);
+      }
+    }
+
+    // ---- search tools: count per type to enforce the cap ----
+    // Count backwards so we can identify which to keep
+    const searchKeepCount = new Map<string, number>();
+
+    // Walk in reverse to mark the first KEEP_RECENT_RESULTS per type as kept
+    const searchKept = new Set<ResultRef>();
+    for (let i = allResults.length - 1; i >= 0; i--) {
+      const r = allResults[i];
+      if (r.toolName === "read_file" || !SNIPPABLE_TOOLS.has(r.toolName))
+        continue;
+      const count = searchKeepCount.get(r.toolName) ?? 0;
+      if (count < KEEP_RECENT_RESULTS) {
+        searchKept.add(r);
+        searchKeepCount.set(r.toolName, count + 1);
+      }
+    }
+
+    // ---- Apply snips ----
+    for (const r of allResults) {
+      if (protectedSet.has(r)) continue;
+      if (!SNIPPABLE_TOOLS.has(r.toolName)) continue;
+      if (typeof r.block.content !== "string") continue;
+      if (r.block.content === SNIP_PLACEHOLDER) continue;
+
+      let shouldSnip = false;
+
+      if (r.toolName === "read_file") {
+        const path = (r.input.file_path as string) ?? "";
+        shouldSnip = latestReadByPath.get(path) !== r;
+      } else {
+        shouldSnip = !searchKept.has(r);
+      }
+
+      if (shouldSnip) {
+        r.block.content = SNIP_PLACEHOLDER;
       }
     }
   }
