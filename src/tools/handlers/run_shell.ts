@@ -1,6 +1,11 @@
 import { execSync } from "node:child_process";
+import { isDangerous } from "@/tools/dangerous";
 
 export function runShell(input: { command: string; timeout?: number }): string {
+  if (isDangerous(input.command)) {
+    return `Blocked: command matched a dangerous pattern and was not executed.\nCommand: ${input.command}`;
+  }
+
   try {
     const result = execSync(input.command, {
       encoding: "utf-8",
