@@ -57,6 +57,10 @@ export function printRetry(attempt: number, maxRetries: number, reason: string):
   console.log(chalk.yellow(`  ⟳ Retrying (${attempt}/${maxRetries}) — ${reason}`));
 }
 
+export function printConfirmation(message: string): void {
+  console.log(chalk.red(`\n  ⚠ Dangerous action: ${message}`));
+}
+
 export function printToolResult(name: string, result: string): void {
   const maxLen = 500;
   const truncated =

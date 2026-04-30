@@ -5,8 +5,12 @@ import { tmpdir } from "node:os";
 import {
   isDangerous,
   parseRule,
+  matchesRule,
+  checkPermissionRules,
+  checkPermission,
   loadPermissionRules,
   resetPermissionRulesCache,
+  type ParsedRule,
 } from "./dangerous";
 
 // ---------------------------------------------------------------------------
@@ -95,6 +99,196 @@ describe("parseRule", () => {
     expect(parseRule("bash")).toEqual({
       tool: "bash",
       pattern: null,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// matchesRule
+// ---------------------------------------------------------------------------
+describe("matchesRule", () => {
+  test("returns false when tool name does not match", () => {
+    const rule: ParsedRule = { tool: "run_shell", pattern: null };
+    expect(matchesRule(rule, "read_file", {})).toBe(false);
+  });
+
+  test("matches any invocation when pattern is null", () => {
+    const rule: ParsedRule = { tool: "run_shell", pattern: null };
+    expect(matchesRule(rule, "run_shell", { command: "ls" })).toBe(true);
+  });
+
+  test("matches run_shell command exactly", () => {
+    const rule: ParsedRule = { tool: "run_shell", pattern: "bun test" };
+    expect(matchesRule(rule, "run_shell", { command: "bun test" })).toBe(true);
+    expect(matchesRule(rule, "run_shell", { command: "bun run" })).toBe(false);
+  });
+
+  test("matches run_shell command with wildcard prefix", () => {
+    const rule: ParsedRule = { tool: "run_shell", pattern: "git push *" };
+    expect(matchesRule(rule, "run_shell", { command: "git push origin main" })).toBe(true);
+    expect(matchesRule(rule, "run_shell", { command: "git pull" })).toBe(false);
+  });
+
+  test("matches file_path for file tools", () => {
+    const rule: ParsedRule = { tool: "write_file", pattern: "/tmp/test.txt" };
+    expect(matchesRule(rule, "write_file", { file_path: "/tmp/test.txt" })).toBe(true);
+    expect(matchesRule(rule, "write_file", { file_path: "/tmp/other.txt" })).toBe(false);
+  });
+
+  test("matches file_path with wildcard prefix", () => {
+    const rule: ParsedRule = { tool: "edit_file", pattern: "/src/*" };
+    expect(matchesRule(rule, "edit_file", { file_path: "/src/foo.ts" })).toBe(true);
+    expect(matchesRule(rule, "edit_file", { file_path: "/lib/foo.ts" })).toBe(false);
+  });
+
+  test("returns true when pattern exists but no matching input field", () => {
+    const rule: ParsedRule = { tool: "web_fetch", pattern: "http://example.com" };
+    expect(matchesRule(rule, "web_fetch", { url: "http://example.com" })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkPermissionRules
+// ---------------------------------------------------------------------------
+describe("checkPermissionRules", () => {
+  beforeEach(() => {
+    resetPermissionRulesCache();
+  });
+
+  afterEach(() => {
+    resetPermissionRulesCache();
+  });
+
+  test("returns null when no rules match", () => {
+    // With default env (no settings files with matching rules), expect null
+    const result = checkPermissionRules("some_unknown_tool", {});
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkPermission
+// ---------------------------------------------------------------------------
+describe("checkPermission", () => {
+  beforeEach(() => {
+    resetPermissionRulesCache();
+  });
+
+  afterEach(() => {
+    resetPermissionRulesCache();
+  });
+
+  // --- bypassPermissions mode ---
+  test("bypassPermissions allows everything", () => {
+    expect(checkPermission("run_shell", { command: "rm -rf /" }, "bypassPermissions")).toEqual({
+      action: "allow",
+    });
+  });
+
+  // --- read tools always allowed ---
+  test("allows read tools in default mode", () => {
+    expect(checkPermission("read_file", { file_path: "/etc/passwd" })).toEqual({ action: "allow" });
+    expect(checkPermission("list_files", { pattern: "**/*" })).toEqual({ action: "allow" });
+    expect(checkPermission("grep_search", { pattern: "foo" })).toEqual({ action: "allow" });
+    expect(checkPermission("tool_search", { query: "test" })).toEqual({ action: "allow" });
+  });
+
+  // --- plan mode ---
+  test("plan mode blocks shell commands", () => {
+    const result = checkPermission("run_shell", { command: "ls" }, "plan");
+    expect(result.action).toBe("deny");
+    expect(result.message).toContain("plan mode");
+  });
+
+  test("plan mode blocks edit tools on non-plan files", () => {
+    const result = checkPermission("write_file", { file_path: "/src/foo.ts" }, "plan", "/plan.md");
+    expect(result.action).toBe("deny");
+    expect(result.message).toContain("plan mode");
+  });
+
+  test("plan mode allows edits to the plan file itself", () => {
+    const result = checkPermission("write_file", { file_path: "/plan.md" }, "plan", "/plan.md");
+    expect(result.action).toBe("allow");
+  });
+
+  test("plan mode allows read tools", () => {
+    expect(checkPermission("read_file", { file_path: "/src/foo.ts" }, "plan")).toEqual({
+      action: "allow",
+    });
+  });
+
+  // --- acceptEdits mode ---
+  test("acceptEdits mode allows edit tools", () => {
+    expect(checkPermission("write_file", { file_path: __filename }, "acceptEdits")).toEqual({
+      action: "allow",
+    });
+    expect(checkPermission("edit_file", { file_path: __filename }, "acceptEdits")).toEqual({
+      action: "allow",
+    });
+  });
+
+  // --- dangerous pattern detection ---
+  test("dangerous shell command requires confirmation in default mode", () => {
+    const result = checkPermission("run_shell", { command: "rm -rf /tmp/foo" }, "default");
+    expect(result.action).toBe("confirm");
+    expect(result.message).toBe("rm -rf /tmp/foo");
+  });
+
+  test("write to non-existent file requires confirmation", () => {
+    const result = checkPermission(
+      "write_file",
+      { file_path: "/tmp/nonexistent-test-file-xyz-12345.txt" },
+      "default",
+    );
+    expect(result.action).toBe("confirm");
+    expect(result.message).toContain("write new file");
+  });
+
+  test("edit of non-existent file requires confirmation", () => {
+    const result = checkPermission(
+      "edit_file",
+      { file_path: "/tmp/nonexistent-test-file-xyz-12345.txt" },
+      "default",
+    );
+    expect(result.action).toBe("confirm");
+    expect(result.message).toContain("edit non-existent file");
+  });
+
+  // --- dontAsk mode ---
+  test("dontAsk mode auto-denies dangerous commands", () => {
+    const result = checkPermission("run_shell", { command: "rm -rf /" }, "dontAsk");
+    expect(result.action).toBe("deny");
+    expect(result.message).toContain("Auto-denied");
+    expect(result.message).toContain("dontAsk");
+  });
+
+  test("dontAsk mode auto-denies write to non-existent file", () => {
+    const result = checkPermission(
+      "write_file",
+      { file_path: "/tmp/nonexistent-test-file-xyz-12345.txt" },
+      "dontAsk",
+    );
+    expect(result.action).toBe("deny");
+    expect(result.message).toContain("Auto-denied");
+  });
+
+  // --- safe commands ---
+  test("safe shell command is allowed in default mode", () => {
+    expect(checkPermission("run_shell", { command: "ls -la" }, "default")).toEqual({
+      action: "allow",
+    });
+  });
+
+  test("edit of existing file is allowed in default mode", () => {
+    // __filename exists
+    expect(checkPermission("edit_file", { file_path: __filename }, "default")).toEqual({
+      action: "allow",
+    });
+  });
+
+  test("write to existing file is allowed in default mode", () => {
+    expect(checkPermission("write_file", { file_path: __filename }, "default")).toEqual({
+      action: "allow",
     });
   });
 });

@@ -11,7 +11,8 @@ import { getActiveToolDefinitions, CONCURRENCY_SAFE_TOOLS } from "@/tools/defini
 import { executeTool } from "@/tools/executor";
 import { runRepl } from "@/cli/repl";
 import { getLatestSessionId, loadSession } from "@/core/session";
-import { printToolCall, printToolResult, printRetry } from "@/cli/ui";
+import { printToolCall, printToolResult, printRetry, printConfirmation } from "@/cli/ui";
+import readline from "node:readline";
 
 // ---------------------------------------------------------------------------
 // API key resolution
@@ -103,6 +104,20 @@ export const chatCommand = new Command("chat")
       onRetry: printRetry,
       thinkingMode: args.thinking ? "enabled" : "disabled",
       concurrencySafeTools: CONCURRENCY_SAFE_TOOLS,
+      permissionMode: args.permissionMode,
+      confirmDangerous: async (message: string) => {
+        printConfirmation(message);
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        return new Promise<boolean>((resolve) => {
+          rl.question("  Allow? (y/n): ", (answer) => {
+            rl.close();
+            resolve(answer.toLowerCase().startsWith("y"));
+          });
+        });
+      },
     });
 
     // --- Resume previous session if requested ---
