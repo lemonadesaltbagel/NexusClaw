@@ -103,6 +103,8 @@ export class Agent {
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
   private lastInputTokenCount = 0;
+  private totalInputTokens = 0;
+  private totalOutputTokens = 0;
   private effectiveWindow = 200_000;
   private lastApiCallTime: number | null = null;
 
@@ -192,9 +194,14 @@ export class Agent {
     }
   }
 
-  /** Display accumulated cost. */
+  /** Display accumulated token usage. */
   showCost(): void {
-    // TODO: implement cost tracking and display
+    const totalTokens = this.totalInputTokens + this.totalOutputTokens;
+    console.log(
+      `  ℹ Token usage — input: ${this.totalInputTokens.toLocaleString()}, ` +
+        `output: ${this.totalOutputTokens.toLocaleString()}, ` +
+        `total: ${totalTokens.toLocaleString()}`,
+    );
   }
 
   /** Compact conversation history to free context space. */
@@ -307,8 +314,10 @@ export class Agent {
       // API call succeeded — clear any withheld PTL error
       withheldError = null;
 
-      // Track input token usage for context pressure budgeting
+      // Track token usage for context pressure budgeting and cost estimation
       this.lastInputTokenCount = response.usage?.input_tokens ?? 0;
+      this.totalInputTokens += response.usage?.input_tokens ?? 0;
+      this.totalOutputTokens += response.usage?.output_tokens ?? 0;
       this.lastApiCallTime = Date.now();
 
       // ----- Auto-compact if context window is nearly full -----
