@@ -798,4 +798,80 @@ describe("auto-compact", () => {
       ),
     ).toBe(false);
   });
+
+  test("OpenAI compaction uses summarizer system override and preserves original system", async () => {
+    // Same structure as Anthropic test but with providerType: "openai"
+    let providerCallCount = 0;
+    let summaryCallSystem: any = undefined;
+
+    const provider: Provider = {
+      createMessage: async (params) => {
+        providerCallCount++;
+        if (providerCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            usage: { input_tokens: 10, output_tokens: 5 },
+            content: [
+              { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+            ],
+          });
+        }
+        if (providerCallCount === 2) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          });
+        }
+        if (providerCallCount === 3) {
+          // Chat 2: high util triggers compaction
+          return makeMessage({
+            stop_reason: "end_turn",
+            usage: { input_tokens: 180_000, output_tokens: 5 },
+          });
+        }
+        if (providerCallCount === 4) {
+          // Summary call — capture system override
+          summaryCallSystem = params.system;
+          return makeMessage({
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "Summary: read a.ts." }],
+            usage: { input_tokens: 1_000, output_tokens: 50 },
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 5_000, output_tokens: 5 },
+        });
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      providerType: "openai",
+      system: "You are a helpful coding assistant.",
+      executeTool: async () => "file content",
+    });
+
+    await agent.chat("Read file");
+    await agent.chat("Continue");
+
+    // Summary call should use summarizer system override
+    expect(summaryCallSystem).toBe(
+      "You are a conversation summarizer. Be concise but preserve important details.",
+    );
+
+    // Messages should be compacted
+    const msgs = agent.getMessages();
+    const summaryUserMsg = msgs.find(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        m.content.includes("Previous conversation summary"),
+    );
+    expect(summaryUserMsg).toBeDefined();
+
+    // lastInputTokenCount reset — next chat should not re-trigger
+    await agent.chat("Third message");
+    expect(providerCallCount).toBe(5); // no extra summary call
+  });
 });

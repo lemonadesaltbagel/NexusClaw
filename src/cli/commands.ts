@@ -94,6 +94,7 @@ export const chatCommand = new Command("chat")
     // --- Create agent ---
     const agent = new Agent({
       provider,
+      providerType: args.apiBase ? "openai" : "anthropic",
       model: args.model,
       system,
       tools,

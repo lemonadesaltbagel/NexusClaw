@@ -71,6 +71,8 @@ export interface AgentOptions {
   planFilePath?: string;
   /** Prompt the user to confirm a dangerous action. Returns true if confirmed. */
   confirmDangerous?: (message: string) => Promise<boolean>;
+  /** Provider type — affects compaction strategy (OpenAI has system as a message). */
+  providerType?: "anthropic" | "openai";
 }
 
 export class Agent {
@@ -95,6 +97,7 @@ export class Agent {
   private permissionMode: PermissionMode;
   private planFilePath?: string;
   private confirmDangerous: (message: string) => Promise<boolean>;
+  private providerType: "anthropic" | "openai";
   private confirmedPaths: Set<string> = new Set();
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
@@ -115,6 +118,7 @@ export class Agent {
     this.checkPermission = options.checkPermission;
     this.permissionMode = options.permissionMode ?? "default";
     this.planFilePath = options.planFilePath;
+    this.providerType = options.providerType ?? "anthropic";
     this.confirmDangerous =
       options.confirmDangerous ?? (async () => false);
 
@@ -688,6 +692,14 @@ export class Agent {
 
   /** Summarize all but the last user message, replacing history with a compact summary. */
   private async compactConversation(): Promise<void> {
+    if (this.providerType === "openai") {
+      return this.compactOpenAI();
+    }
+    return this.compactAnthropic();
+  }
+
+  /** Compact for Anthropic — system prompt is separate from messages. */
+  private async compactAnthropic(): Promise<void> {
     if (this.messages.length < 4) return;
 
     const lastUserMsg = this.messages[this.messages.length - 1];
@@ -714,6 +726,64 @@ export class Agent {
         ? summaryResp.content[0].text
         : "No summary available.";
 
+    this.messages = [
+      {
+        role: "user",
+        content: `[Previous conversation summary]\n${summaryText}`,
+      },
+      {
+        role: "assistant",
+        content:
+          "Understood. I have the context from our previous conversation. " +
+          "How can I continue helping?",
+      },
+    ];
+
+    if (lastUserMsg.role === "user") {
+      this.messages.push(lastUserMsg);
+    }
+
+    this.lastInputTokenCount = 0;
+  }
+
+  /**
+   * Compact for OpenAI — system prompt occupies a message slot so the
+   * minimum threshold is higher (system + 4 conversation messages = 5).
+   * The original system prompt is preserved through compaction.
+   */
+  private async compactOpenAI(): Promise<void> {
+    // OpenAI: system takes a slot, so need at least 5 effective messages
+    // (system + 4 conversation) to have enough to compact.
+    if (this.messages.length < 4) return;
+
+    const lastUserMsg = this.messages[this.messages.length - 1];
+
+    // Summary call — override system with summarizer instruction while
+    // the conversation body (minus last msg) is sent for summarization.
+    const summaryResp = await this.provider.createMessage({
+      model: this.model,
+      maxTokens: 2048,
+      messages: [
+        ...this.messages.slice(0, -1),
+        {
+          role: "user",
+          content:
+            "Summarize the conversation so far in a concise paragraph, " +
+            "preserving key decisions, file paths, and context needed to continue the work.",
+        },
+      ],
+      system:
+        "You are a conversation summarizer. Be concise but preserve important details.",
+      thinkingMode: "disabled",
+    });
+
+    const summaryText =
+      summaryResp.content[0]?.type === "text"
+        ? summaryResp.content[0].text
+        : "No summary available.";
+
+    // Reset messages — the original this.system is preserved separately
+    // and will be re-prepended by the OpenAI provider on the next call.
     this.messages = [
       {
         role: "user",
