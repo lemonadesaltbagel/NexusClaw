@@ -875,3 +875,259 @@ describe("auto-compact", () => {
     expect(providerCallCount).toBe(5); // no extra summary call
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. Manual compaction via agent.compact()
+// ---------------------------------------------------------------------------
+
+describe("manual compact", () => {
+  test("compact() calls compactConversation and logs confirmation", async () => {
+    // Build enough history (>=4 messages) so compaction actually fires
+    let providerCallCount = 0;
+
+    const provider: Provider = {
+      createMessage: async () => {
+        providerCallCount++;
+        if (providerCallCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            usage: { input_tokens: 10, output_tokens: 5 },
+            content: [
+              { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+            ],
+          });
+        }
+        if (providerCallCount === 2) {
+          return makeMessage({
+            stop_reason: "end_turn",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          });
+        }
+        // Summary call from compact()
+        return makeMessage({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Summary of work so far." }],
+          usage: { input_tokens: 500, output_tokens: 30 },
+        });
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      executeTool: async () => "ok",
+    });
+
+    await agent.chat("Do something");
+    // messages: [user, assistant(tool_use), user(tool_result)] = 3
+
+    // Add another user msg to reach >= 4
+    await agent.chat("Another turn");
+    // messages: [user, asst, user(tr), user("Another turn")] = 4
+
+    const logSpy: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => logSpy.push(args.join(" "));
+
+    try {
+      await agent.compact();
+    } finally {
+      console.log = origLog;
+    }
+
+    // Should have called provider for summary
+    expect(providerCallCount).toBeGreaterThanOrEqual(3);
+
+    // Should have logged confirmation
+    expect(logSpy.some((l) => l.includes("Conversation compacted"))).toBe(true);
+
+    // Messages should be compacted
+    const msgs = agent.getMessages();
+    const hasSummary = msgs.some(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        m.content.includes("Previous conversation summary"),
+    );
+    expect(hasSummary).toBe(true);
+  });
+
+  test("compact() is a no-op when history is too short", async () => {
+    let providerCallCount = 0;
+
+    const provider: Provider = {
+      createMessage: async () => {
+        providerCallCount++;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        });
+      },
+    };
+
+    const agent = new Agent({ provider });
+    await agent.chat("Hello");
+    // Only 1 message, too short to compact
+
+    const countBefore = providerCallCount;
+    await agent.compact();
+
+    // No extra provider call for summary
+    expect(providerCallCount).toBe(countBefore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Token tracking and showCost()
+// ---------------------------------------------------------------------------
+
+describe("token tracking", () => {
+  test("accumulates input and output tokens across multiple turns", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      createMessage: async () => {
+        callCount++;
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1000 * callCount, output_tokens: 100 * callCount },
+        });
+      },
+    };
+
+    const agent = new Agent({ provider });
+    await agent.chat("Turn 1"); // 1000 in, 100 out
+    await agent.chat("Turn 2"); // 2000 in, 200 out
+
+    const logSpy: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => logSpy.push(args.join(" "));
+
+    try {
+      agent.showCost();
+    } finally {
+      console.log = origLog;
+    }
+
+    // Total: 3000 input, 300 output, 3300 total
+    expect(logSpy.length).toBe(1);
+    expect(logSpy[0]).toContain("3,000");  // input
+    expect(logSpy[0]).toContain("300");    // output
+    expect(logSpy[0]).toContain("3,300");  // total
+  });
+
+  test("token counts include tool-use sub-turns", async () => {
+    let callCount = 0;
+    const provider: Provider = {
+      createMessage: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return makeMessage({
+            stop_reason: "tool_use",
+            usage: { input_tokens: 500, output_tokens: 50 },
+            content: [
+              { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+            ],
+          });
+        }
+        return makeMessage({
+          stop_reason: "end_turn",
+          usage: { input_tokens: 800, output_tokens: 80 },
+        });
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      executeTool: async () => "ok",
+    });
+
+    await agent.chat("Read file");
+    // Two API calls: tool_use (500/50) + end_turn (800/80)
+
+    const logSpy: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => logSpy.push(args.join(" "));
+
+    try {
+      agent.showCost();
+    } finally {
+      console.log = origLog;
+    }
+
+    // Total: 1300 input, 130 output
+    expect(logSpy[0]).toContain("1,300");
+    expect(logSpy[0]).toContain("130");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. Compression pipeline ordering
+// ---------------------------------------------------------------------------
+
+describe("compression pipeline ordering", () => {
+  test("budget runs before snip (Tier 1 before Tier 2)", async () => {
+    // If budget trims content first, snip sees smaller content.
+    // Verify both run by checking their combined effects.
+    // Setup: 5 read_file calls to same file with large content at >70% utilization.
+    // Budget (Tier 1) trims content to 15K, then snip (Tier 2) removes dups.
+    const largeContent = "x".repeat(20_000); // under 30KB persist threshold
+
+    const tools = [
+      { id: "tu_1", name: "read_file", input: { file_path: "/src/main.ts" } },
+      { id: "tu_2", name: "read_file", input: { file_path: "/src/a.ts" } },
+      { id: "tu_3", name: "read_file", input: { file_path: "/src/b.ts" } },
+      { id: "tu_4", name: "read_file", input: { file_path: "/src/main.ts" } },
+      { id: "tu_5", name: "read_file", input: { file_path: "/src/c.ts" } },
+    ];
+
+    const toolMsgs = tools.map((t) =>
+      makeMessage({
+        stop_reason: "tool_use" as const,
+        usage: { input_tokens: 160_000, output_tokens: 5 }, // 80%
+        content: [{ type: "tool_use", ...t }],
+      }),
+    );
+    const endMsg = makeMessage({
+      stop_reason: "end_turn",
+      usage: { input_tokens: 160_000, output_tokens: 5 },
+    });
+
+    let callCount = 0;
+    const provider: Provider = {
+      createMessage: async () => {
+        callCount++;
+        if (callCount <= 5) return toolMsgs[callCount - 1];
+        return endMsg;
+      },
+    };
+
+    const agent = new Agent({
+      provider,
+      executeTool: async () => largeContent,
+    });
+
+    await agent.chat("Read files");
+
+    const msgs = agent.getMessages();
+    const toolResults = msgs
+      .filter((m) => m.role === "user" && Array.isArray(m.content))
+      .flatMap((m) =>
+        (m.content as any[]).filter((b: any) => b.type === "tool_result"),
+      );
+
+    // tu_1 (main.ts dup): snipped by Tier 2
+    expect(toolResults[0].content).toBe("[Content snipped - re-read if needed]");
+
+    // tu_2 (a.ts): unique file, not snipped, but budgeted by Tier 1
+    // At 80% utilization, budget is 15K, and 20K content > 15K → trimmed
+    expect(toolResults[1].content).toContain("budgeted");
+    expect(toolResults[1].content.length).toBeLessThanOrEqual(15_100);
+
+    // tu_3-5: protected by last-3, but still budgeted
+    for (let i = 2; i < 5; i++) {
+      // Protected from snip, but budget still applies
+      if (toolResults[i].content !== "[Content snipped - re-read if needed]") {
+        expect(toolResults[i].content.length).toBeLessThanOrEqual(15_100);
+      }
+    }
+  });
+});
