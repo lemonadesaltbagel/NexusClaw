@@ -306,6 +306,9 @@ export class Agent {
       this.lastInputTokenCount = response.usage?.input_tokens ?? 0;
       this.lastApiCallTime = Date.now();
 
+      // ----- Auto-compact if context window is nearly full -----
+      await this.checkAndCompact();
+
       // ----- Dispatch on stop_reason -----
       switch (response.stop_reason) {
         // ---- tool_use: model wants to use a tool ----
@@ -673,6 +676,62 @@ export class Agent {
         block.content = "[Old result cleared]";
       }
     }
+  }
+
+  /** Trigger compaction when context utilization exceeds 85%. */
+  private async checkAndCompact(): Promise<void> {
+    if (this.lastInputTokenCount > this.effectiveWindow * 0.85) {
+      console.error("Context window filling up, compacting conversation...");
+      await this.compactConversation();
+    }
+  }
+
+  /** Summarize all but the last user message, replacing history with a compact summary. */
+  private async compactConversation(): Promise<void> {
+    if (this.messages.length < 4) return;
+
+    const lastUserMsg = this.messages[this.messages.length - 1];
+
+    const summaryResp = await this.provider.createMessage({
+      model: this.model,
+      maxTokens: 2048,
+      messages: [
+        ...this.messages.slice(0, -1),
+        {
+          role: "user",
+          content:
+            "Summarize the conversation so far in a concise paragraph, " +
+            "preserving key decisions, file paths, and context needed to continue the work.",
+        },
+      ],
+      system:
+        "You are a conversation summarizer. Be concise but preserve important details.",
+      thinkingMode: "disabled",
+    });
+
+    const summaryText =
+      summaryResp.content[0]?.type === "text"
+        ? summaryResp.content[0].text
+        : "No summary available.";
+
+    this.messages = [
+      {
+        role: "user",
+        content: `[Previous conversation summary]\n${summaryText}`,
+      },
+      {
+        role: "assistant",
+        content:
+          "Understood. I have the context from our previous conversation. " +
+          "How can I continue helping?",
+      },
+    ];
+
+    if (lastUserMsg.role === "user") {
+      this.messages.push(lastUserMsg);
+    }
+
+    this.lastInputTokenCount = 0;
   }
 
   /** Commit pending collapse to free token space. */
