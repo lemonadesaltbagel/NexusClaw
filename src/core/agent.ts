@@ -6,11 +6,13 @@ import {
   MAX_RECOVERY_RETRIES,
   type Message,
   type MessageParam,
+  type PermissionMode,
   type PermissionResult,
   type QueryResult,
   type ThinkingMode,
   type ToolUseBlock,
 } from "@/core/types";
+import { checkPermission } from "@/tools/dangerous";
 import { saveSession } from "@/core/session";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
@@ -55,6 +57,12 @@ export interface AgentOptions {
     name: string,
     input: Record<string, unknown>,
   ) => PermissionResult;
+  /** Permission mode controlling tool access. */
+  permissionMode?: PermissionMode;
+  /** Path to the plan file (edits allowed in plan mode). */
+  planFilePath?: string;
+  /** Prompt the user to confirm a dangerous action. Returns true if confirmed. */
+  confirmDangerous?: (message: string) => Promise<boolean>;
 }
 
 export class Agent {
@@ -76,6 +84,10 @@ export class Agent {
   private thinkingMode: ThinkingMode;
   private concurrencySafeTools: Set<string>;
   private checkPermission?: AgentOptions["checkPermission"];
+  private permissionMode: PermissionMode;
+  private planFilePath?: string;
+  private confirmDangerous: (message: string) => Promise<boolean>;
+  private confirmedPaths: Set<string> = new Set();
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
@@ -90,6 +102,10 @@ export class Agent {
     this.thinkingMode = options.thinkingMode ?? "disabled";
     this.concurrencySafeTools = options.concurrencySafeTools ?? new Set();
     this.checkPermission = options.checkPermission;
+    this.permissionMode = options.permissionMode ?? "default";
+    this.planFilePath = options.planFilePath;
+    this.confirmDangerous =
+      options.confirmDangerous ?? (async () => false);
 
     this.executeTool =
       options.executeTool ??
@@ -394,9 +410,44 @@ export class Agent {
           });
         }
       } else {
-        // Non-safe tools execute sequentially
+        // Non-safe tools execute sequentially with permission checks
         for (const { block, input } of batch.items) {
           if (this.abortController?.signal.aborted) break;
+
+          const perm = checkPermission(
+            block.name,
+            input as Record<string, any>,
+            this.permissionMode,
+            this.planFilePath,
+          );
+
+          if (perm.action === "deny") {
+            console.error(`Denied: ${perm.message}`);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: `Action denied: ${perm.message}`,
+            });
+            continue;
+          }
+
+          if (
+            perm.action === "confirm" &&
+            perm.message &&
+            !this.confirmedPaths.has(perm.message)
+          ) {
+            const confirmed = await this.confirmDangerous(perm.message);
+            if (!confirmed) {
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: block.id,
+                content: "User denied this action.",
+              });
+              continue;
+            }
+            this.confirmedPaths.add(perm.message);
+          }
+
           this.onToolCall(block.name, input);
           let content: string;
           try {

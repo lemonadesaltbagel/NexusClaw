@@ -1,6 +1,10 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import type { PermissionMode } from "@/core/types";
+
+const READ_TOOLS = new Set(["read_file", "list_files", "grep_search", "tool_search"]);
+const EDIT_TOOLS = new Set(["write_file", "edit_file"]);
 
 const DANGEROUS_PATTERNS = [
   /\brm\s/,
@@ -59,6 +63,26 @@ export function resetPermissionRulesCache(): void {
   cachedRules = null;
 }
 
+export function matchesRule(
+  rule: ParsedRule,
+  toolName: string,
+  input: Record<string, any>
+): boolean {
+  if (rule.tool !== toolName) return false;
+  if (!rule.pattern) return true;
+
+  let value = "";
+  if (toolName === "run_shell") value = input.command || "";
+  else if (input.file_path) value = input.file_path;
+  else return true;
+
+  const pattern = rule.pattern;
+  if (pattern.endsWith("*")) {
+    return value.startsWith(pattern.slice(0, -1));
+  }
+  return value === pattern;
+}
+
 export function loadPermissionRules(): PermissionRules {
   if (cachedRules) return cachedRules;
 
@@ -80,4 +104,80 @@ export function loadPermissionRules(): PermissionRules {
 
   cachedRules = { allow, deny };
   return cachedRules;
+}
+
+export function checkPermissionRules(
+  toolName: string,
+  input: Record<string, any>
+): "allow" | "deny" | null {
+  const rules = loadPermissionRules();
+
+  for (const rule of rules.deny) {
+    if (matchesRule(rule, toolName, input)) return "deny";
+  }
+  for (const rule of rules.allow) {
+    if (matchesRule(rule, toolName, input)) return "allow";
+  }
+  return null;
+}
+
+export function checkPermission(
+  toolName: string,
+  input: Record<string, any>,
+  mode: PermissionMode = "default",
+  planFilePath?: string
+): { action: "allow" | "deny" | "confirm"; message?: string } {
+  if (mode === "bypassPermissions") return { action: "allow" };
+
+  // Layer 1: config file rules (deny takes precedence)
+  const ruleResult = checkPermissionRules(toolName, input);
+  if (ruleResult === "deny") {
+    return { action: "deny", message: `Denied by permission rule for ${toolName}` };
+  }
+  if (ruleResult === "allow") {
+    return { action: "allow" };
+  }
+
+  // Read tools are always safe
+  if (READ_TOOLS.has(toolName)) return { action: "allow" };
+
+  // Permission mode checks
+  if (mode === "plan") {
+    if (EDIT_TOOLS.has(toolName)) {
+      const filePath = input.file_path || input.path;
+      if (planFilePath && filePath === planFilePath) return { action: "allow" };
+      return { action: "deny", message: `Blocked in plan mode: ${toolName}` };
+    }
+    if (toolName === "run_shell") {
+      return { action: "deny", message: "Shell commands blocked in plan mode" };
+    }
+  }
+
+  if (mode === "acceptEdits" && EDIT_TOOLS.has(toolName)) {
+    return { action: "allow" };
+  }
+
+  // Layer 2: built-in dangerous pattern checks
+  let needsConfirm = false;
+  let confirmMessage = "";
+
+  if (toolName === "run_shell" && isDangerous(input.command)) {
+    needsConfirm = true;
+    confirmMessage = input.command;
+  } else if (toolName === "write_file" && !existsSync(input.file_path)) {
+    needsConfirm = true;
+    confirmMessage = `write new file: ${input.file_path}`;
+  } else if (toolName === "edit_file" && !existsSync(input.file_path)) {
+    needsConfirm = true;
+    confirmMessage = `edit non-existent file: ${input.file_path}`;
+  }
+
+  if (needsConfirm) {
+    if (mode === "dontAsk") {
+      return { action: "deny", message: `Auto-denied (dontAsk mode): ${confirmMessage}` };
+    }
+    return { action: "confirm", message: confirmMessage };
+  }
+
+  return { action: "allow" };
 }
