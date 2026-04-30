@@ -247,10 +247,10 @@ export class Agent {
     let withheldError: unknown = null;
 
     while (true) {
-      // ----- Trim history if context pressure is high -----
-      this.microcompact();
-      this.budgetToolResults();
-      this.snipStaleResults();
+      // ----- Compression pipeline (Tier 1 → 2 → 3) -----
+      this.budgetToolResults();    // Tier 1: tighten oversized results
+      this.snipStaleResults();     // Tier 2: snip redundant/stale results
+      this.microcompact();         // Tier 3: clear old results after idle
 
       // ----- API call -----
       let response: Message;
