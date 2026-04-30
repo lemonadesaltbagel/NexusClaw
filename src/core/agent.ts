@@ -199,7 +199,8 @@ export class Agent {
 
   /** Compact conversation history to free context space. */
   async compact(): Promise<void> {
-    // TODO: implement user-facing compaction
+    await this.compactConversation();
+    console.log("  ℹ Conversation compacted.");
   }
 
   /** Toggle plan mode on/off. */
