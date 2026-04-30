@@ -334,33 +334,87 @@ export class Agent {
       (b): b is ToolUseBlock => b.type === "tool_use",
     );
 
+    // Pre-check each tool block for concurrency eligibility
+    type CheckedBlock = {
+      block: ToolUseBlock;
+      input: Record<string, unknown>;
+      concurrent: boolean;
+    };
+    const checked: CheckedBlock[] = toolBlocks.map((block) => {
+      const input = block.input as Record<string, unknown>;
+      const isSafe = this.concurrencySafeTools.has(block.name);
+      const perm = this.checkPermission?.(block.name, input);
+      const allowed = !perm || perm.behavior === "allow";
+      return { block, input, concurrent: isSafe && allowed };
+    });
+
+    // Group consecutive concurrency-safe tools into batches
+    type Batch = { concurrent: boolean; items: CheckedBlock[] };
+    const batches: Batch[] = [];
+    for (const cb of checked) {
+      if (
+        cb.concurrent &&
+        batches.length > 0 &&
+        batches[batches.length - 1].concurrent
+      ) {
+        batches[batches.length - 1].items.push(cb);
+      } else {
+        batches.push({ concurrent: cb.concurrent, items: [cb] });
+      }
+    }
+
     const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
 
-    for (const block of toolBlocks) {
+    for (const batch of batches) {
       if (this.abortController?.signal.aborted) break;
 
-      const toolInput = block.input as Record<string, unknown>;
-      this.onToolCall(block.name, toolInput);
-
-      let content: string;
-      try {
-        const earlyPromise = earlyExecutions.get(block.id);
-        if (earlyPromise) {
-          content = await earlyPromise;
-        } else {
-          content = await this.executeTool(block.name, toolInput);
+      if (batch.concurrent) {
+        // Execute concurrency-safe batch in parallel
+        const results = await Promise.all(
+          batch.items.map(async ({ block, input }) => {
+            this.onToolCall(block.name, input);
+            let content: string;
+            try {
+              const earlyPromise = earlyExecutions.get(block.id);
+              content = earlyPromise
+                ? await earlyPromise
+                : await this.executeTool(block.name, input);
+            } catch (err) {
+              content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
+            }
+            this.onToolResult(block.name, content);
+            return { block, content };
+          }),
+        );
+        for (const { block, content } of results) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content,
+          });
         }
-      } catch (err) {
-        content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
+      } else {
+        // Non-safe tools execute sequentially
+        for (const { block, input } of batch.items) {
+          if (this.abortController?.signal.aborted) break;
+          this.onToolCall(block.name, input);
+          let content: string;
+          try {
+            const earlyPromise = earlyExecutions.get(block.id);
+            content = earlyPromise
+              ? await earlyPromise
+              : await this.executeTool(block.name, input);
+          } catch (err) {
+            content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          this.onToolResult(block.name, content);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content,
+          });
+        }
       }
-
-      this.onToolResult(block.name, content);
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content,
-      });
     }
 
     this.messages = [
