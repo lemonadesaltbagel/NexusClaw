@@ -14,6 +14,9 @@ import {
 } from "@/core/types";
 import { checkPermission } from "@/tools/dangerous";
 import { saveSession } from "@/core/session";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
@@ -91,6 +94,8 @@ export class Agent {
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
+  private lastInputTokenCount = 0;
+  private effectiveWindow = 200_000;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -224,6 +229,9 @@ export class Agent {
     let withheldError: unknown = null;
 
     while (true) {
+      // ----- Budget tool results if context pressure is high -----
+      this.budgetToolResults();
+
       // ----- API call -----
       let response: Message;
 
@@ -285,6 +293,9 @@ export class Agent {
 
       // API call succeeded — clear any withheld PTL error
       withheldError = null;
+
+      // Track input token usage for context pressure budgeting
+      this.lastInputTokenCount = response.usage?.input_tokens ?? 0;
 
       // ----- Dispatch on stop_reason -----
       switch (response.stop_reason) {
@@ -398,6 +409,7 @@ export class Agent {
             } catch (err) {
               content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
             }
+            content = this.persistLargeResult(block.name, content);
             this.onToolResult(block.name, content);
             return { block, content };
           }),
@@ -458,6 +470,7 @@ export class Agent {
           } catch (err) {
             content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
           }
+          content = this.persistLargeResult(block.name, content);
           this.onToolResult(block.name, content);
           toolResults.push({
             type: "tool_result",
@@ -473,6 +486,50 @@ export class Agent {
       { role: "assistant", content: response.content },
       { role: "user", content: toolResults },
     ];
+  }
+
+  /** Persist large tool results to disk and return a truncated preview. */
+  private persistLargeResult(toolName: string, result: string): string {
+    const THRESHOLD = 30 * 1024; // 30 KB
+    if (Buffer.byteLength(result) <= THRESHOLD) return result;
+
+    const dir = join(homedir(), ".mini-claude", "tool-results");
+    mkdirSync(dir, { recursive: true });
+    const filename = `${Date.now()}-${toolName}.txt`;
+    const filepath = join(dir, filename);
+    writeFileSync(filepath, result);
+
+    const lines = result.split("\n");
+    const preview = lines.slice(0, 200).join("\n");
+    const sizeKB = (Buffer.byteLength(result) / 1024).toFixed(1);
+
+    return `[Result too large (${sizeKB} KB, ${lines.length} lines). Full output saved to ${filepath}. You can use read_file to see the full result.]\n\nPreview (first 200 lines):\n${preview}`;
+  }
+
+  /** Dynamically tighten tool results in history based on context pressure. */
+  private budgetToolResults(): void {
+    const utilization = this.lastInputTokenCount / this.effectiveWindow;
+    if (utilization < 0.5) return;
+
+    const budget = utilization > 0.7 ? 15_000 : 30_000;
+
+    for (const msg of this.messages) {
+      if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+      for (let i = 0; i < msg.content.length; i++) {
+        const block = msg.content[i] as any;
+        if (
+          block.type === "tool_result" &&
+          typeof block.content === "string" &&
+          block.content.length > budget
+        ) {
+          const keepEach = Math.floor((budget - 80) / 2);
+          block.content =
+            block.content.slice(0, keepEach) +
+            `\n\n[... budgeted: ${block.content.length - keepEach * 2} chars truncated ...]\n\n` +
+            block.content.slice(-keepEach);
+        }
+      }
+    }
   }
 
   /** Commit pending collapse to free token space. */
