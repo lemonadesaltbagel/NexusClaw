@@ -175,6 +175,18 @@ export const toolDefinitions: ToolDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Concurrency-safe tools — read-only tools that can safely run in parallel.
+// Used by the Agent to batch consecutive tool calls via Promise.all.
+// ---------------------------------------------------------------------------
+
+export const CONCURRENCY_SAFE_TOOLS = new Set([
+  "read_file",
+  "list_files",
+  "grep_search",
+  "web_fetch",
+]);
+
+// ---------------------------------------------------------------------------
 // Deferred tool activation
 // ---------------------------------------------------------------------------
 

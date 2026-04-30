@@ -7,7 +7,7 @@ import type { Provider } from "@/core/provider";
 import { AnthropicProvider } from "@/core/providers/anthropic";
 import { OpenAIProvider } from "@/core/providers/openai";
 import { buildSystemPrompt } from "@/core/prompt";
-import { getActiveToolDefinitions } from "@/tools/definitions";
+import { getActiveToolDefinitions, CONCURRENCY_SAFE_TOOLS } from "@/tools/definitions";
 import { executeTool } from "@/tools/executor";
 import { runRepl } from "@/cli/repl";
 import { getLatestSessionId, loadSession } from "@/core/session";
@@ -102,6 +102,7 @@ export const chatCommand = new Command("chat")
       onToolResult: printToolResult,
       onRetry: printRetry,
       thinkingMode: args.thinking ? "enabled" : "disabled",
+      concurrencySafeTools: CONCURRENCY_SAFE_TOOLS,
     });
 
     // --- Resume previous session if requested ---
