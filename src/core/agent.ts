@@ -14,6 +14,12 @@ import {
 } from "@/core/types";
 import { checkPermission } from "@/tools/dangerous";
 import { saveSession } from "@/core/session";
+import {
+  startMemoryPrefetch,
+  formatMemoriesForInjection,
+  type MemoryPrefetch,
+  type SideQueryFn,
+} from "@/core/memory";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -73,6 +79,8 @@ export interface AgentOptions {
   confirmDangerous?: (message: string) => Promise<boolean>;
   /** Provider type — affects compaction strategy (OpenAI has system as a message). */
   providerType?: "anthropic" | "openai";
+  /** Whether this agent is a sub-agent (disables memory prefetch). */
+  isSubAgent?: boolean;
 }
 
 export class Agent {
@@ -107,6 +115,9 @@ export class Agent {
   private totalOutputTokens = 0;
   private effectiveWindow = 200_000;
   private lastApiCallTime: number | null = null;
+  private isSubAgent: boolean;
+  private alreadySurfacedMemories = new Set<string>();
+  private sessionMemoryBytes = 0;
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -121,6 +132,7 @@ export class Agent {
     this.permissionMode = options.permissionMode ?? "default";
     this.planFilePath = options.planFilePath;
     this.providerType = options.providerType ?? "anthropic";
+    this.isSubAgent = options.isSubAgent ?? false;
     this.confirmDangerous =
       options.confirmDangerous ?? (async () => false);
 
@@ -232,12 +244,45 @@ export class Agent {
   }
 
   // -----------------------------------------------------------------------
+  // Side query — lightweight LLM call for memory selection
+  // -----------------------------------------------------------------------
+
+  /** Build a side-query function using the current provider. */
+  private buildSideQuery(): SideQueryFn | null {
+    return async (system: string, userMessage: string, signal?: AbortSignal) => {
+      const resp = await this.provider.createMessage({
+        model: this.model,
+        maxTokens: 1024,
+        messages: [{ role: "user", content: userMessage }],
+        system,
+        thinkingMode: "disabled",
+        signal,
+      });
+      const block = resp.content[0];
+      return block?.type === "text" ? block.text : "";
+    };
+  }
+
+  // -----------------------------------------------------------------------
   // runTurn — core method driving one full user→assistant turn.
   // Provider-agnostic: delegates streaming to this.provider.
   // -----------------------------------------------------------------------
 
   private async runTurn(userMessage: string): Promise<QueryResult> {
     this.messages.push({ role: "user", content: userMessage });
+
+    // Start memory prefetch (non-blocking, runs in parallel with API call)
+    let memoryPrefetch: MemoryPrefetch | null = null;
+    if (!this.isSubAgent) {
+      const sq = this.buildSideQuery();
+      if (sq) {
+        memoryPrefetch = startMemoryPrefetch(
+          userMessage, sq,
+          this.alreadySurfacedMemories, this.sessionMemoryBytes,
+          this.abortController?.signal,
+        );
+      }
+    }
 
     let currentMaxTokens = this.maxTokens;
     let hasEscalated = false;
@@ -247,6 +292,20 @@ export class Agent {
     let withheldError: unknown = null;
 
     while (true) {
+      // ----- Non-blocking memory prefetch poll -----
+      if (memoryPrefetch && memoryPrefetch.settled && !memoryPrefetch.consumed) {
+        memoryPrefetch.consumed = true;
+        const memories = await memoryPrefetch.promise;
+        if (memories.length > 0) {
+          const injectionText = formatMemoriesForInjection(memories);
+          this.messages.push({ role: "user", content: injectionText });
+          for (const m of memories) {
+            this.alreadySurfacedMemories.add(m.path);
+            this.sessionMemoryBytes += Buffer.byteLength(m.content);
+          }
+        }
+      }
+
       // ----- Compression pipeline (Tier 1 → 2 → 3) -----
       this.budgetToolResults();    // Tier 1: tighten oversized results
       this.snipStaleResults();     // Tier 2: snip redundant/stale results

@@ -17,8 +17,10 @@ import {
   memoryAge,
   memoryFreshnessWarning,
   selectRelevantMemories,
+  startMemoryPrefetch,
+  formatMemoriesForInjection,
 } from "../../src/core/memory.js";
-import type { SideQueryFn } from "../../src/core/memory.js";
+import type { SideQueryFn, RelevantMemory } from "../../src/core/memory.js";
 
 // ---------------------------------------------------------------------------
 // Frontmatter parsing / formatting
@@ -521,5 +523,97 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
     expect(result.length).toBeLessThanOrEqual(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Async prefetch
+// ---------------------------------------------------------------------------
+
+describe("startMemoryPrefetch", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "nexus-memory-prefetch-"));
+  });
+
+  afterEach(() => {
+    const memDir = getMemoryDir(tmpDir);
+    try { rmSync(memDir, { recursive: true, force: true }); } catch {}
+    try { rmSync(join(memDir, ".."), { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  const mockSideQuery: SideQueryFn = async () => '{"selected_memories": []}';
+
+  test("returns null for single-word queries", () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const result = startMemoryPrefetch("hello", mockSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(result).toBeNull();
+  });
+
+  test("returns null when session budget exceeded", () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const result = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 60_000, undefined, tmpDir);
+    expect(result).toBeNull();
+  });
+
+  test("returns null when no memory files exist", () => {
+    const result = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(result).toBeNull();
+  });
+
+  test("returns prefetch handle for valid multi-word query with memories", () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const handle = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(handle).not.toBeNull();
+    expect(handle!.settled).toBe(false);
+    expect(handle!.consumed).toBe(false);
+  });
+
+  test("prefetch settles asynchronously", async () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const handle = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(handle).not.toBeNull();
+
+    await handle!.promise;
+    // settled flag is set via .then(), may need a microtask tick
+    await new Promise((r) => setTimeout(r, 0));
+    expect(handle!.settled).toBe(true);
+  });
+
+  test("prefetch settles on error too", async () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const failingSideQuery: SideQueryFn = async () => { throw new Error("fail"); };
+    const handle = startMemoryPrefetch("hello world", failingSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(handle).not.toBeNull();
+
+    await handle!.promise;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(handle!.settled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatMemoriesForInjection
+// ---------------------------------------------------------------------------
+
+describe("formatMemoriesForInjection", () => {
+  test("wraps memories in system-reminder tags", () => {
+    const memories: RelevantMemory[] = [
+      { path: "/tmp/a.md", content: "content A", mtimeMs: 1000, header: "Memory: /tmp/a.md:" },
+      { path: "/tmp/b.md", content: "content B", mtimeMs: 2000, header: "Memory: /tmp/b.md:" },
+    ];
+
+    const result = formatMemoriesForInjection(memories);
+    expect(result).toContain("<system-reminder>");
+    expect(result).toContain("</system-reminder>");
+    expect(result).toContain("content A");
+    expect(result).toContain("content B");
+    expect(result).toContain("Memory: /tmp/a.md:");
+  });
+
+  test("returns empty string for empty array", () => {
+    expect(formatMemoriesForInjection([])).toBe("");
   });
 });

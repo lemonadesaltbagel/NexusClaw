@@ -59,6 +59,13 @@ export type SideQueryFn = (
   signal?: AbortSignal,
 ) => Promise<string>;
 
+/** Handle for a non-blocking memory prefetch. */
+export interface MemoryPrefetch {
+  promise: Promise<RelevantMemory[]>;
+  settled: boolean;
+  consumed: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -390,6 +397,59 @@ export async function selectRelevantMemories(
     console.error(`[memory] semantic recall failed: ${err.message}`);
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Async prefetch
+// ---------------------------------------------------------------------------
+
+const MAX_SESSION_MEMORY_BYTES = 60_000;
+
+/**
+ * Start a non-blocking memory prefetch that runs in parallel with the
+ * first model API call.  Returns null if gating conditions fail.
+ *
+ * Gates:
+ *  1. Multi-word query (single words are too short for semantic matching)
+ *  2. Session budget not exceeded (60 KB cumulative)
+ *  3. Memory files actually exist on disk
+ */
+export function startMemoryPrefetch(
+  query: string,
+  sideQuery: SideQueryFn,
+  alreadySurfaced: Set<string>,
+  sessionMemoryBytes: number,
+  signal?: AbortSignal,
+  cwd?: string,
+): MemoryPrefetch | null {
+  // Gate 1: Skip single-word queries (too short for semantic matching)
+  if (!/\s/.test(query.trim())) return null;
+
+  // Gate 2: Session budget is full
+  if (sessionMemoryBytes >= MAX_SESSION_MEMORY_BYTES) return null;
+
+  // Gate 3: No memory files exist
+  const dir = getMemoryDir(cwd);
+  if (!existsSync(dir)) return null;
+  const hasMemories = readdirSync(dir).some(
+    (f) => f.endsWith(".md") && f !== "MEMORY.md"
+  );
+  if (!hasMemories) return null;
+
+  const handle: MemoryPrefetch = {
+    promise: selectRelevantMemories(query, sideQuery, alreadySurfaced, signal, cwd),
+    settled: false,
+    consumed: false,
+  };
+  handle.promise.then(() => { handle.settled = true; }).catch(() => { handle.settled = true; });
+  return handle;
+}
+
+/** Format recalled memories for injection as user messages. */
+export function formatMemoriesForInjection(memories: RelevantMemory[]): string {
+  return memories
+    .map((m) => `<system-reminder>\n${m.header}\n\n${m.content}\n</system-reminder>`)
+    .join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
