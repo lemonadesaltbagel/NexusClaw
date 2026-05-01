@@ -141,6 +141,11 @@ export function checkPermission(
   // Read tools are always safe
   if (READ_TOOLS.has(toolName)) return { action: "allow" };
 
+  // Plan mode tools: always allow (handled in agent.ts)
+  if (toolName === "enter_plan_mode" || toolName === "exit_plan_mode") {
+    return { action: "allow" };
+  }
+
   // Permission mode checks
   if (mode === "plan") {
     if (EDIT_TOOLS.has(toolName)) {
