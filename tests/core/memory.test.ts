@@ -211,11 +211,15 @@ describe("buildMemoryPromptSection", () => {
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   });
 
-  test("returns empty string when no memories exist", () => {
-    expect(buildMemoryPromptSection(tmpDir)).toBe("");
+  test("always returns memory system instructions", () => {
+    const section = buildMemoryPromptSection(tmpDir);
+    expect(section).toContain("# Memory System");
+    expect(section).toContain("Memory Types");
+    expect(section).toContain("How to Save Memories");
+    expect(section).toContain("(No memories saved yet.)");
   });
 
-  test("includes all memories in prompt section", () => {
+  test("includes memory index when memories exist", () => {
     saveMemory(
       { name: "user role", description: "role info", type: "user", content: "Senior engineer" },
       tmpDir
@@ -226,11 +230,11 @@ describe("buildMemoryPromptSection", () => {
     );
 
     const section = buildMemoryPromptSection(tmpDir);
-    expect(section).toContain("# Remembered Context");
-    expect(section).toContain("[user] user role");
-    expect(section).toContain("Senior engineer");
-    expect(section).toContain("[feedback] no mocks");
-    expect(section).toContain("Use real DB in tests");
+    expect(section).toContain("# Memory System");
+    expect(section).toContain("## Current Memory Index");
+    expect(section).toContain("user role");
+    expect(section).toContain("no mocks");
+    expect(section).not.toContain("(No memories saved yet.)");
   });
 });
 

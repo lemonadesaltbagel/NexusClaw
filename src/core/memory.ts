@@ -239,14 +239,42 @@ function updateMemoryIndex(cwd?: string): void {
 
 /** Build the memory section for the system prompt. */
 export function buildMemoryPromptSection(cwd?: string): string {
-  const memories = listMemories(cwd);
-  if (memories.length === 0) return "";
+  const index = loadMemoryIndex(cwd);
+  const memoryDir = getMemoryDir(cwd);
 
-  const sections: string[] = ["\n# Remembered Context"];
+  return `# Memory System
 
-  for (const m of memories) {
-    sections.push(`\n## [${m.type}] ${m.name}\n${m.content}`);
-  }
+You have a persistent, file-based memory system at \`${memoryDir}\`.
 
-  return sections.join("\n");
+## Memory Types
+- **user**: User's role, preferences, knowledge level
+- **feedback**: Corrections and guidance from the user
+- **project**: Ongoing work, goals, deadlines, decisions
+- **reference**: Pointers to external resources
+
+## How to Save Memories
+Use the write_file tool to create a memory file with YAML frontmatter:
+
+\`\`\`markdown
+---
+name: {{memory name}}
+description: {{one-line description}}
+type: {{user | feedback | project | reference}}
+---
+
+{{memory content}}
+\`\`\`
+
+Save to: \`${memoryDir}/\`
+Filename format: \`{type}_{slugified_name}.md\`
+
+After saving, update the index file at \`${memoryDir}/MEMORY.md\` with a one-line pointer.
+
+## What NOT to Save
+- Code patterns or architecture (read the code instead)
+- Git history (use git log)
+- Anything already in CLAUDE.md
+- Ephemeral task details
+
+${index ? `## Current Memory Index\n${index}` : "(No memories saved yet.)"}`;
 }
