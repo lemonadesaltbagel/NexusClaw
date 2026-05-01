@@ -44,6 +44,22 @@ describe("toolDefinitions", () => {
     expect(names).toContain("grep_search");
     expect(names).toContain("run_shell");
     expect(names).toContain("tool_search");
+    expect(names).toContain("enter_plan_mode");
+    expect(names).toContain("exit_plan_mode");
+  });
+
+  test("plan mode tools are deferred", () => {
+    const enterTool = toolDefinitions.find((d) => d.name === "enter_plan_mode");
+    const exitTool = toolDefinitions.find((d) => d.name === "exit_plan_mode");
+    expect(enterTool?.deferred).toBe(true);
+    expect(exitTool?.deferred).toBe(true);
+  });
+
+  test("plan mode tools have empty input schemas", () => {
+    const enterTool = toolDefinitions.find((d) => d.name === "enter_plan_mode");
+    const exitTool = toolDefinitions.find((d) => d.name === "exit_plan_mode");
+    expect(Object.keys(enterTool!.input_schema.properties)).toHaveLength(0);
+    expect(Object.keys(exitTool!.input_schema.properties)).toHaveLength(0);
   });
 
   test("required fields reference existing properties", () => {

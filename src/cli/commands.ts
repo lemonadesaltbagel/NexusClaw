@@ -11,7 +11,8 @@ import { getActiveToolDefinitions, CONCURRENCY_SAFE_TOOLS } from "@/tools/defini
 import { executeTool } from "@/tools/executor";
 import { runRepl } from "@/cli/repl";
 import { getLatestSessionId, loadSession } from "@/core/session";
-import { printToolCall, printToolResult, printRetry, printConfirmation } from "@/cli/ui";
+import { printToolCall, printToolResult, printRetry, printConfirmation, printPlanForApproval, printPlanApprovalOptions } from "@/cli/ui";
+import type { PlanApprovalResult } from "@/core/agent";
 import readline from "node:readline";
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,9 @@ export const chatCommand = new Command("chat")
     const tools = getActiveToolDefinitions() as Anthropic.Messages.Tool[];
 
     // --- Create agent ---
+    // Don't pass "plan" directly — togglePlanMode() handles plan mode entry
+    const initialPermission = args.permissionMode === "plan" ? "default" : args.permissionMode;
+
     const agent = new Agent({
       provider,
       providerType: args.apiBase ? "openai" : "anthropic",
@@ -105,7 +109,7 @@ export const chatCommand = new Command("chat")
       onRetry: printRetry,
       thinkingMode: args.thinking ? "enabled" : "disabled",
       concurrencySafeTools: CONCURRENCY_SAFE_TOOLS,
-      permissionMode: args.permissionMode,
+      permissionMode: initialPermission,
       confirmDangerous: async (message: string) => {
         printConfirmation(message);
         const rl = readline.createInterface({
@@ -119,7 +123,46 @@ export const chatCommand = new Command("chat")
           });
         });
       },
+      planApprovalFn: async (planContent: string): Promise<PlanApprovalResult> => {
+        printPlanForApproval(planContent);
+        printPlanApprovalOptions();
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        return new Promise<PlanApprovalResult>((resolve) => {
+          const askChoice = () => {
+            rl.question("  Enter choice (1-4): ", (answer) => {
+              const choice = answer.trim();
+              if (choice === "1") {
+                rl.close();
+                resolve({ choice: "clear-and-execute" });
+              } else if (choice === "2") {
+                rl.close();
+                resolve({ choice: "execute" });
+              } else if (choice === "3") {
+                rl.close();
+                resolve({ choice: "manual-execute" });
+              } else if (choice === "4") {
+                rl.question("  Feedback (what to change): ", (feedback) => {
+                  rl.close();
+                  resolve({ choice: "keep-planning", feedback: feedback.trim() || undefined });
+                });
+              } else {
+                console.log("  Invalid choice. Enter 1, 2, 3, or 4.");
+                askChoice();
+              }
+            });
+          };
+          askChoice();
+        });
+      },
     });
+
+    // --- Initialize plan mode if --plan was passed ---
+    if (args.permissionMode === "plan") {
+      agent.togglePlanMode();
+    }
 
     // --- Resume previous session if requested ---
     if (args.resume) {

@@ -217,6 +217,19 @@ describe("checkPermission", () => {
     });
   });
 
+  // --- plan mode tools always allowed ---
+  test("enter_plan_mode is always allowed regardless of mode", () => {
+    expect(checkPermission("enter_plan_mode", {}, "default")).toEqual({ action: "allow" });
+    expect(checkPermission("enter_plan_mode", {}, "plan")).toEqual({ action: "allow" });
+    expect(checkPermission("enter_plan_mode", {}, "dontAsk")).toEqual({ action: "allow" });
+  });
+
+  test("exit_plan_mode is always allowed regardless of mode", () => {
+    expect(checkPermission("exit_plan_mode", {}, "default")).toEqual({ action: "allow" });
+    expect(checkPermission("exit_plan_mode", {}, "plan")).toEqual({ action: "allow" });
+    expect(checkPermission("exit_plan_mode", {}, "acceptEdits")).toEqual({ action: "allow" });
+  });
+
   // --- acceptEdits mode ---
   test("acceptEdits mode allows edit tools", () => {
     expect(checkPermission("write_file", { file_path: __filename }, "acceptEdits")).toEqual({

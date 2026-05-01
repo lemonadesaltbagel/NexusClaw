@@ -22,7 +22,7 @@ import {
 } from "@/core/memory";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
@@ -39,6 +39,11 @@ const MICROCOMPACT_IDLE_MS = 5 * 60 * 1000;
 // dispatch, context compaction, and token-limit recovery. The Agent is
 // provider-agnostic — it delegates all API communication to a Provider.
 // ---------------------------------------------------------------------------
+
+export interface PlanApprovalResult {
+  choice: "execute" | "clear-and-execute" | "manual-execute" | "keep-planning";
+  feedback?: string;
+}
 
 export interface AgentOptions {
   provider: Provider;
@@ -77,6 +82,8 @@ export interface AgentOptions {
   planFilePath?: string;
   /** Prompt the user to confirm a dangerous action. Returns true if confirmed. */
   confirmDangerous?: (message: string) => Promise<boolean>;
+  /** Prompt the user to approve/reject a plan when exit_plan_mode is called. */
+  planApprovalFn?: (planContent: string) => Promise<PlanApprovalResult>;
   /** Provider type — affects compaction strategy (OpenAI has system as a message). */
   providerType?: "anthropic" | "openai";
   /** Whether this agent is a sub-agent (disables memory prefetch). */
@@ -105,6 +112,7 @@ export class Agent {
   private permissionMode: PermissionMode;
   private planFilePath?: string;
   private confirmDangerous: (message: string) => Promise<boolean>;
+  private planApprovalFn?: (planContent: string) => Promise<PlanApprovalResult>;
   private providerType: "anthropic" | "openai";
   private confirmedPaths: Set<string> = new Set();
   private prePlanMode: PermissionMode | null = null;
@@ -139,6 +147,7 @@ export class Agent {
     this.isSubAgent = options.isSubAgent ?? false;
     this.confirmDangerous =
       options.confirmDangerous ?? (async () => false);
+    this.planApprovalFn = options.planApprovalFn;
 
     this.executeTool =
       options.executeTool ??
@@ -190,6 +199,11 @@ export class Agent {
   /** The model name this agent is using. */
   getModel(): string {
     return this.model;
+  }
+
+  /** Set the plan approval callback (for deferred setup after construction). */
+  setPlanApprovalFn(fn: (planContent: string) => Promise<PlanApprovalResult>): void {
+    this.planApprovalFn = fn;
   }
 
   /** Persist the current session to disk. */
@@ -290,6 +304,92 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       ];
     }
     return planInstructions;
+  }
+
+  /** Clear message history while preserving the system prompt. */
+  private clearHistoryKeepSystem(): void {
+    this.messages = [];
+  }
+
+  /** Execute plan mode tool calls (enter_plan_mode / exit_plan_mode). */
+  private async executePlanModeTool(name: string): Promise<string> {
+    if (name === "enter_plan_mode") {
+      if (this.permissionMode === "plan") {
+        return "Already in plan mode.";
+      }
+      this.prePlanMode = this.permissionMode;
+      this.permissionMode = "plan";
+      this.planFilePath = this.generatePlanFilePath();
+      this.system = this.buildPlanModePrompt();
+      console.error("  ℹ Entered plan mode (read-only). Plan file: " + this.planFilePath);
+      return `Entered plan mode. You are now in read-only mode.\n\n` +
+        `Your plan file: ${this.planFilePath}\n` +
+        `Write your plan to this file. This is the only file you can edit.\n\n` +
+        `When your plan is complete, call exit_plan_mode.`;
+    }
+
+    if (name === "exit_plan_mode") {
+      if (this.permissionMode !== "plan") {
+        return "Not in plan mode.";
+      }
+      // Read plan file contents
+      let planContent = "(No plan file found)";
+      if (this.planFilePath && existsSync(this.planFilePath)) {
+        planContent = readFileSync(this.planFilePath, "utf-8");
+      }
+
+      // Interactive approval workflow
+      if (this.planApprovalFn) {
+        const result = await this.planApprovalFn(planContent);
+
+        if (result.choice === "keep-planning") {
+          // User rejected — stay in plan mode, return feedback to model
+          const feedback = result.feedback || "Please revise the plan.";
+          return `User rejected the plan and wants to keep planning.\n\n` +
+            `User feedback: ${feedback}\n\n` +
+            `Please revise your plan based on this feedback. When done, call exit_plan_mode again.`;
+        }
+
+        // User approved — determine target permission mode
+        let targetMode: PermissionMode;
+        if (result.choice === "clear-and-execute" || result.choice === "execute") {
+          targetMode = "acceptEdits";
+        } else {
+          targetMode = this.prePlanMode || "default"; // manual-execute: restore original mode
+        }
+
+        // Exit plan mode
+        this.permissionMode = targetMode;
+        this.prePlanMode = null;
+        const savedPlanPath = this.planFilePath;
+        this.planFilePath = undefined;
+        this.system = this.baseSystemPrompt;
+
+        // Clear context (if clear-and-execute was chosen)
+        if (result.choice === "clear-and-execute") {
+          this.clearHistoryKeepSystem();
+          this.contextCleared = true;
+          console.error(`  ℹ Plan approved. Context cleared, executing in ${targetMode} mode.`);
+          return `User approved the plan. Context was cleared. Permission mode: ${targetMode}\n\n` +
+            `Plan file: ${savedPlanPath}\n\n## Approved Plan:\n${planContent}\n\nProceed with implementation.`;
+        }
+
+        console.error(`  ℹ Plan approved. Executing in ${targetMode} mode.`);
+        return `User approved the plan. Permission mode: ${targetMode}\n\n` +
+          `## Approved Plan:\n${planContent}\n\nProceed with implementation.`;
+      }
+
+      // Fallback: exit directly when no approval function exists (e.g., sub-agent)
+      this.permissionMode = this.prePlanMode || "default";
+      this.prePlanMode = null;
+      this.planFilePath = undefined;
+      this.system = this.baseSystemPrompt;
+      console.error("  ℹ Exited plan mode. Restored to " + this.permissionMode + " mode.");
+      return `Exited plan mode. Permission mode restored to: ${this.permissionMode}\n\n` +
+        `## Your Plan:\n${planContent}`;
+    }
+
+    return `Unknown plan mode tool: ${name}`;
   }
 
   /** High-level entry point: runs one full turn with abort support. */
@@ -613,10 +713,14 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
           this.onToolCall(block.name, input);
           let content: string;
           try {
-            const earlyPromise = earlyExecutions.get(block.id);
-            content = earlyPromise
-              ? await earlyPromise
-              : await this.executeTool(block.name, input);
+            if (block.name === "enter_plan_mode" || block.name === "exit_plan_mode") {
+              content = await this.executePlanModeTool(block.name);
+            } else {
+              const earlyPromise = earlyExecutions.get(block.id);
+              content = earlyPromise
+                ? await earlyPromise
+                : await this.executeTool(block.name, input);
+            }
           } catch (err) {
             content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
           }

@@ -69,3 +69,25 @@ export function printToolResult(name: string, result: string): void {
       : result;
   console.log(chalk.dim(truncated.split("\n").map((l) => "  " + l).join("\n")));
 }
+
+export function printPlanForApproval(planContent: string): void {
+  console.log(chalk.cyan("\n  ━━━ Plan for Approval ━━━"));
+  const lines = planContent.split("\n");
+  const maxLines = 60;
+  const display = lines.slice(0, maxLines);
+  for (const line of display) {
+    console.log(chalk.white("  " + line));
+  }
+  if (lines.length > maxLines) {
+    console.log(chalk.gray(`  ... (${lines.length - maxLines} more lines)`));
+  }
+  console.log(chalk.cyan("  ━━━━━━━━━━━━━━━━━━━━━━━━\n"));
+}
+
+export function printPlanApprovalOptions(): void {
+  console.log(chalk.yellow("  Choose an option:"));
+  console.log("    1) Yes, clear context and execute — fresh start with auto-accept edits");
+  console.log("    2) Yes, and execute — keep context, auto-accept edits");
+  console.log("    3) Yes, manually approve edits — keep context, confirm each edit");
+  console.log("    4) No, keep planning — provide feedback to revise");
+}
