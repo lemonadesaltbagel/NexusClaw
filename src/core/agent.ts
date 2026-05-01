@@ -107,6 +107,9 @@ export class Agent {
   private confirmDangerous: (message: string) => Promise<boolean>;
   private providerType: "anthropic" | "openai";
   private confirmedPaths: Set<string> = new Set();
+  private prePlanMode: PermissionMode | null = null;
+  private baseSystemPrompt: string | Anthropic.Messages.TextBlockParam[] | undefined;
+  private contextCleared: boolean = false;
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
   private sessionStartTime: string = new Date().toISOString();
@@ -124,6 +127,7 @@ export class Agent {
     this.model = options.model ?? "claude-sonnet-4-5-20250514";
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.system = options.system;
+    this.baseSystemPrompt = options.system;
     this.tools = options.tools;
 
     this.thinkingMode = options.thinkingMode ?? "disabled";
@@ -223,8 +227,69 @@ export class Agent {
   }
 
   /** Toggle plan mode on/off. */
-  togglePlanMode(): void {
-    // TODO: implement plan mode toggle
+  togglePlanMode(): string {
+    if (this.permissionMode === "plan") {
+      // Exit: restore original mode, clean up state, remove plan prompt
+      this.permissionMode = this.prePlanMode || "default";
+      this.prePlanMode = null;
+      this.planFilePath = undefined;
+      this.system = this.baseSystemPrompt;
+      console.error(`  ℹ Exited plan mode → ${this.permissionMode} mode`);
+      return this.permissionMode;
+    } else {
+      // Enter: save current mode, switch permission, generate plan file, inject prompt
+      this.prePlanMode = this.permissionMode;
+      this.permissionMode = "plan";
+      this.planFilePath = this.generatePlanFilePath();
+      this.system = this.buildPlanModePrompt();
+      console.error(`  ℹ Entered plan mode. Plan file: ${this.planFilePath}`);
+      return "plan";
+    }
+  }
+
+  /** Generate a session-scoped plan file path under ~/.claude/plans/. */
+  private generatePlanFilePath(): string {
+    const dir = join(homedir(), ".claude", "plans");
+    mkdirSync(dir, { recursive: true });
+    return join(dir, `plan-${this.sessionId}.md`);
+  }
+
+  /** Build the system prompt with plan mode instructions appended. */
+  private buildPlanModePrompt(): string | Anthropic.Messages.TextBlockParam[] {
+    const planInstructions = `
+
+# Plan Mode Active
+
+Plan mode is active. You MUST NOT make any edits (except the plan file below),
+run non-readonly tools, or make any changes to the system.
+
+## Plan File: ${this.planFilePath}
+Write your plan incrementally to this file using write_file or edit_file.
+This is the ONLY file you are allowed to edit.
+
+## Workflow
+1. **Explore**: Read code to understand the task. Use read_file, list_files, grep_search.
+2. **Design**: Design your implementation approach.
+3. **Write Plan**: Write a structured plan to the plan file including:
+   - **Context**: Why this change is needed
+   - **Steps**: Implementation steps with critical file paths
+   - **Verification**: How to test the changes
+4. **Exit**: Call exit_plan_mode when your plan is ready for user review.
+
+IMPORTANT: When your plan is complete, you MUST call exit_plan_mode.
+Do NOT ask the user to approve — exit_plan_mode handles that.`;
+
+    const base = this.baseSystemPrompt;
+    if (typeof base === "string") {
+      return base + planInstructions;
+    }
+    if (Array.isArray(base)) {
+      return [
+        ...base,
+        { type: "text" as const, text: planInstructions },
+      ];
+    }
+    return planInstructions;
   }
 
   /** High-level entry point: runs one full turn with abort support. */
