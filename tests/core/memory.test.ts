@@ -23,6 +23,31 @@ import {
 import type { SideQueryFn, RelevantMemory } from "../../src/core/memory.js";
 
 // ---------------------------------------------------------------------------
+// Path hashing
+// ---------------------------------------------------------------------------
+
+describe("getMemoryDir", () => {
+  test("returns deterministic path for same cwd", () => {
+    const a = getMemoryDir("/some/project");
+    const b = getMemoryDir("/some/project");
+    expect(a).toBe(b);
+  });
+
+  test("returns different paths for different cwds", () => {
+    const a = getMemoryDir("/project/alpha");
+    const b = getMemoryDir("/project/beta");
+    expect(a).not.toBe(b);
+  });
+
+  test("path contains .nexus/projects and memory", () => {
+    const dir = getMemoryDir("/test");
+    expect(dir).toContain(".nexus");
+    expect(dir).toContain("projects");
+    expect(dir).toMatch(/memory$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Frontmatter parsing / formatting
 // ---------------------------------------------------------------------------
 
@@ -69,6 +94,39 @@ url: https://example.com:8080/path
 body`;
     const result = parseFrontmatter(input);
     expect(result.meta.url).toBe("https://example.com:8080/path");
+  });
+
+  test("handles empty body after frontmatter", () => {
+    const input = `---
+name: empty body
+---`;
+    const result = parseFrontmatter(input);
+    expect(result.meta.name).toBe("empty body");
+    expect(result.body).toBe("");
+  });
+
+  test("handles empty value", () => {
+    const input = `---
+name:
+type: user
+---
+
+body`;
+    const result = parseFrontmatter(input);
+    expect(result.meta.name).toBe("");
+    expect(result.meta.type).toBe("user");
+  });
+
+  test("skips lines without colons in frontmatter", () => {
+    const input = `---
+name: valid
+no-colon-line
+type: user
+---
+
+body`;
+    const result = parseFrontmatter(input);
+    expect(result.meta).toEqual({ name: "valid", type: "user" });
   });
 });
 
@@ -184,6 +242,23 @@ describe("memory CRUD", () => {
     expect(deleteMemory("nope.md", tmpDir)).toBe(false);
   });
 
+  test("listMemories returns empty array for nonexistent dir", () => {
+    const fakeDir = join(os.tmpdir(), "nexus-nonexistent-" + Date.now());
+    expect(listMemories(fakeDir)).toEqual([]);
+  });
+
+  test("saveMemory handles special characters in name", () => {
+    const filename = saveMemory(
+      { name: "user's «config» & prefs!", description: "special chars", type: "user", content: "x" },
+      tmpDir
+    );
+    expect(filename).toMatch(/^user_.*\.md$/);
+    // Should be retrievable
+    const entry = getMemory(filename, tmpDir);
+    expect(entry).not.toBeNull();
+    expect(entry!.name).toBe("user's «config» & prefs!");
+  });
+
   test("saveMemory overwrites existing entry with same name/type", () => {
     saveMemory(
       { name: "role", description: "v1", type: "user", content: "version 1" },
@@ -225,6 +300,19 @@ describe("buildMemoryPromptSection", () => {
     expect(section).toContain("Memory Types");
     expect(section).toContain("How to Save Memories");
     expect(section).toContain("(No memories saved yet.)");
+  });
+
+  test("includes memory dir path in instructions", () => {
+    const section = buildMemoryPromptSection(tmpDir);
+    const memDir = getMemoryDir(tmpDir);
+    expect(section).toContain(memDir);
+  });
+
+  test("includes save format instructions", () => {
+    const section = buildMemoryPromptSection(tmpDir);
+    expect(section).toContain("Filename format:");
+    expect(section).toContain("{type}_{slugified_name}.md");
+    expect(section).toContain("MEMORY.md");
   });
 
   test("includes memory index when memories exist", () => {
@@ -346,6 +434,29 @@ describe("scanMemoryHeaders", () => {
     expect(headers[0].mtimeMs).toBeGreaterThan(0);
     expect(headers[0].filePath).toContain("user_role.md");
   });
+
+  test("returns multiple headers sorted", () => {
+    saveMemory({ name: "alpha", description: "a", type: "user", content: "a" }, tmpDir);
+    saveMemory({ name: "beta", description: "b", type: "feedback", content: "b" }, tmpDir);
+    saveMemory({ name: "gamma", description: "c", type: "project", content: "c" }, tmpDir);
+
+    const headers = scanMemoryHeaders(tmpDir);
+    expect(headers).toHaveLength(3);
+    expect(headers.map(h => h.type)).toContain("user");
+    expect(headers.map(h => h.type)).toContain("feedback");
+    expect(headers.map(h => h.type)).toContain("project");
+  });
+
+  test("skips malformed files without frontmatter", () => {
+    saveMemory({ name: "valid", description: "v", type: "user", content: "ok" }, tmpDir);
+    // Write a malformed file directly
+    const memDir = getMemoryDir(tmpDir);
+    writeFileSync(join(memDir, "bad_file.md"), "no frontmatter here");
+
+    const headers = scanMemoryHeaders(tmpDir);
+    expect(headers).toHaveLength(1);
+    expect(headers[0].name).toBe("valid");
+  });
 });
 
 describe("formatMemoryManifest", () => {
@@ -373,7 +484,11 @@ describe("memoryAge", () => {
     expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 * 10)).toBe("10 days ago");
   });
 
-  test("returns months for over 30 days", () => {
+  test("returns '1 month ago' for 30-59 days", () => {
+    expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 * 35)).toBe("1 month ago");
+  });
+
+  test("returns months for over 60 days", () => {
     expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 * 60)).toBe("2 months ago");
   });
 });
@@ -508,6 +623,72 @@ describe("selectRelevantMemories", () => {
     expect(result[0].content).toContain("[... truncated");
   });
 
+  test("passes query text to sideQuery", async () => {
+    saveMemory(
+      { name: "test", description: "t", type: "user", content: "x" },
+      tmpDir
+    );
+
+    let receivedUserMessage = "";
+    const sideQuery: SideQueryFn = async (_system, userMessage) => {
+      receivedUserMessage = userMessage;
+      return '{"selected_memories": []}';
+    };
+
+    await selectRelevantMemories("fix the auth bug", sideQuery, new Set(), undefined, tmpDir);
+    expect(receivedUserMessage).toContain("fix the auth bug");
+    expect(receivedUserMessage).toContain("Available memories:");
+  });
+
+  test("includes freshness header for recent memories", async () => {
+    saveMemory(
+      { name: "fresh", description: "just saved", type: "user", content: "fresh content" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () =>
+      '{"selected_memories": ["user_fresh.md"]}';
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toHaveLength(1);
+    expect(result[0].header).toContain("Memory");
+    expect(result[0].header).toContain("user_fresh.md");
+    // Fresh memory should not have a staleness warning
+    expect(result[0].header).not.toContain("⚠️");
+  });
+
+  test("returns empty on aborted signal", async () => {
+    saveMemory(
+      { name: "test", description: "t", type: "user", content: "x" },
+      tmpDir
+    );
+
+    const controller = new AbortController();
+    controller.abort();
+
+    const sideQuery: SideQueryFn = async (_s, _u, signal) => {
+      signal?.throwIfAborted();
+      return '{"selected_memories": []}';
+    };
+
+    const result = await selectRelevantMemories("hello world", sideQuery, new Set(), controller.signal, tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  test("ignores filenames not in candidates", async () => {
+    saveMemory(
+      { name: "real", description: "exists", type: "user", content: "yes" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () =>
+      '{"selected_memories": ["user_real.md", "nonexistent_fake.md"]}';
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toHaveLength(1);
+    expect(result[0].content).toContain("yes");
+  });
+
   test("limits selection to 5 memories", async () => {
     for (let i = 0; i < 8; i++) {
       saveMemory(
@@ -552,10 +733,22 @@ describe("startMemoryPrefetch", () => {
     expect(result).toBeNull();
   });
 
+  test("returns null for whitespace-only queries", () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const result = startMemoryPrefetch("   ", mockSideQuery, new Set(), 0, undefined, tmpDir);
+    expect(result).toBeNull();
+  });
+
   test("returns null when session budget exceeded", () => {
     saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
     const result = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 60_000, undefined, tmpDir);
     expect(result).toBeNull();
+  });
+
+  test("returns handle when budget is just under limit", () => {
+    saveMemory({ name: "test", description: "t", type: "user", content: "x" }, tmpDir);
+    const handle = startMemoryPrefetch("hello world", mockSideQuery, new Set(), 59_999, undefined, tmpDir);
+    expect(handle).not.toBeNull();
   });
 
   test("returns null when no memory files exist", () => {
@@ -615,5 +808,21 @@ describe("formatMemoriesForInjection", () => {
 
   test("returns empty string for empty array", () => {
     expect(formatMemoriesForInjection([])).toBe("");
+  });
+
+  test("wraps single memory correctly with header and content", () => {
+    const memories: RelevantMemory[] = [
+      { path: "/tmp/x.md", content: "the content", mtimeMs: 1000, header: "Memory (saved today): /tmp/x.md:" },
+    ];
+
+    const result = formatMemoriesForInjection(memories);
+    // Should have exactly one pair of tags
+    const openTags = result.match(/<system-reminder>/g);
+    const closeTags = result.match(/<\/system-reminder>/g);
+    expect(openTags).toHaveLength(1);
+    expect(closeTags).toHaveLength(1);
+    // Content and header should appear between tags
+    expect(result).toContain("Memory (saved today): /tmp/x.md:");
+    expect(result).toContain("the content");
   });
 });
