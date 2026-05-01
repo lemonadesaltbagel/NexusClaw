@@ -158,6 +158,25 @@ export const toolDefinitions: ToolDef[] = [
     },
   },
   {
+    name: "skill",
+    description:
+      "Invoke a registered skill by name. Skills are reusable prompt templates discovered from .claude/skills/ directories.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        skill_name: {
+          type: "string",
+          description: "The name of the skill to invoke",
+        },
+        args: {
+          type: "string",
+          description: "Arguments to pass to the skill template",
+        },
+      },
+      required: ["skill_name"],
+    },
+  },
+  {
     name: "tool_search",
     description:
       "Search for available tools by name or keyword. Returns full schemas for matching deferred tools and activates them for use.",

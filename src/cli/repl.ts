@@ -1,5 +1,6 @@
 import * as readline from "node:readline/promises";
 import type { Agent } from "@/core/agent";
+import { getSkillByName, resolveSkillPrompt } from "@/core/skills";
 
 // ---------------------------------------------------------------------------
 // Print helpers (stubs)
@@ -60,6 +61,22 @@ export async function runRepl(agent: Agent): Promise<void> {
         askQuestion(); return;
       }
       if (input === "/plan") { agent.togglePlanMode(); askQuestion(); return; }
+
+      // Skill slash-command: /skill-name [args]
+      if (input.startsWith("/")) {
+        const spaceIdx = input.indexOf(" ");
+        const cmdName = spaceIdx > 0 ? input.slice(1, spaceIdx) : input.slice(1);
+        const cmdArgs = spaceIdx > 0 ? input.slice(spaceIdx + 1) : "";
+        const skill = getSkillByName(cmdName);
+        if (skill && skill.userInvocable) {
+          const resolved = resolveSkillPrompt(skill, cmdArgs);
+          console.error(`  ℹ Invoking skill: ${skill.name}`);
+          try { await agent.chat(resolved); } catch (e: any) {
+            if (e.name !== "AbortError" && !e.message?.includes("aborted")) printError(e.message);
+          }
+          askQuestion(); return;
+        }
+      }
 
       try {
         await agent.chat(input);

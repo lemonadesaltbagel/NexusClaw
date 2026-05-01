@@ -153,6 +153,38 @@ export function resolveSkillPrompt(skill: SkillDefinition, args: string): string
 }
 
 // ---------------------------------------------------------------------------
+// Skill execution
+// ---------------------------------------------------------------------------
+
+export interface SkillExecutionResult {
+  prompt: string;
+  allowedTools?: string[];
+  /** "inject" returns the prompt to the caller; "fork" runs in a sub-agent. */
+  context: "inject" | "fork";
+}
+
+/** Look up a skill by name. */
+export function getSkillByName(name: string): SkillDefinition | undefined {
+  return discoverSkills().find((s) => s.name === name);
+}
+
+/** Execute a skill: resolve its prompt and return an execution result. */
+export function executeSkill(
+  skillName: string,
+  args: string,
+): SkillExecutionResult | null {
+  const skill = getSkillByName(skillName);
+  if (!skill) return null;
+
+  const prompt = resolveSkillPrompt(skill, args);
+  return {
+    prompt,
+    allowedTools: skill.allowedTools,
+    context: skill.allowedTools ? "fork" : "inject",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Build skill descriptions for the system prompt
 // ---------------------------------------------------------------------------
 

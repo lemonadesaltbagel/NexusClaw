@@ -13,6 +13,7 @@ import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
 import { toolDefinitions, activatedTools } from "@/tools/definitions";
+import { executeSkill } from "@/core/skills";
 
 /** Tracks mtimeMs for files that have been read — used to enforce read-before-write. */
 export const readFileState = new Map<string, number>();
@@ -98,6 +99,18 @@ export async function executeTool(
     case "web_fetch":
       result = await webFetch(input as { url: string; max_length?: number });
       break;
+    case "skill": {
+      const skillResult = executeSkill(
+        input.skill_name as string,
+        (input.args as string) || "",
+      );
+      if (!skillResult) {
+        result = `Unknown skill: ${input.skill_name}`;
+        break;
+      }
+      result = `[Skill "${input.skill_name}" activated]\n\n${skillResult.prompt}`;
+      break;
+    }
     case "tool_search": {
       const query = ((input.query as string) || "").toLowerCase();
       const deferred = toolDefinitions.filter((t) => t.deferred);
