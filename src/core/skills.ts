@@ -141,6 +141,18 @@ export function clearSkillsCache(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Skill prompt resolution
+// ---------------------------------------------------------------------------
+
+/** Resolve a skill's prompt template, substituting arguments and skill dir. */
+export function resolveSkillPrompt(skill: SkillDefinition, args: string): string {
+  let prompt = skill.promptTemplate;
+  prompt = prompt.replace(/\$ARGUMENTS|\$\{ARGUMENTS\}/g, args);
+  prompt = prompt.replace(/\$\{CLAUDE_SKILL_DIR\}/g, skill.skillDir);
+  return prompt;
+}
+
+// ---------------------------------------------------------------------------
 // Build skill descriptions for the system prompt
 // ---------------------------------------------------------------------------
 
