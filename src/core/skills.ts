@@ -193,13 +193,26 @@ export function buildSkillDescriptions(): string {
   const skills = discoverSkills();
   if (skills.length === 0) return "";
 
-  const lines: string[] = [];
-  for (const skill of skills) {
-    let entry = `- ${skill.name}`;
-    if (skill.description) entry += `: ${skill.description}`;
-    if (skill.whenToUse) entry += ` (${skill.whenToUse})`;
-    lines.push(entry);
+  const lines = ["# Available Skills", ""];
+  const invocable = skills.filter((s) => s.userInvocable);
+  const autoOnly = skills.filter((s) => !s.userInvocable);
+
+  if (invocable.length > 0) {
+    lines.push("User-invocable skills (user types /<name> to invoke):");
+    for (const s of invocable) {
+      lines.push(`- **/${s.name}**: ${s.description}`);
+      if (s.whenToUse) lines.push(`  When to use: ${s.whenToUse}`);
+    }
   }
 
+  if (autoOnly.length > 0) {
+    lines.push("Auto-invocable skills (use the skill tool when appropriate):");
+    for (const s of autoOnly) {
+      lines.push(`- **${s.name}**: ${s.description}`);
+      if (s.whenToUse) lines.push(`  When to use: ${s.whenToUse}`);
+    }
+  }
+
+  lines.push("To invoke a skill programmatically, use the `skill` tool.");
   return lines.join("\n");
 }
