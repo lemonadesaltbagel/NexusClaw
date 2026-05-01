@@ -10,7 +10,7 @@
 //   └── reference_ci_dashboard_url.md
 // ---------------------------------------------------------------------------
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
 import * as os from "os";
@@ -33,6 +33,31 @@ export interface MemoryEntry {
   type: MemoryType;
   content: string;
 }
+
+/** Header info scanned from a memory file (without reading full body). */
+export interface MemoryHeader {
+  filename: string;
+  filePath: string;
+  name: string;
+  description: string;
+  type: MemoryType;
+  mtimeMs: number;
+}
+
+/** A memory selected by semantic recall, with full content loaded. */
+export interface RelevantMemory {
+  path: string;
+  content: string;
+  mtimeMs: number;
+  header: string;
+}
+
+/** Signature for the side-query function provided by the agent. */
+export type SideQueryFn = (
+  system: string,
+  userMessage: string,
+  signal?: AbortSignal,
+) => Promise<string>;
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -231,6 +256,140 @@ function updateMemoryIndex(cwd?: string): void {
     lines.push(`- **[${m.name}](${m.filename})** (${m.type}) — ${m.description}`);
   }
   writeFileSync(getIndexPath(cwd), lines.join("\n") + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Semantic recall (sideQuery)
+// ---------------------------------------------------------------------------
+
+const MAX_MEMORY_BYTES_PER_FILE = 4096;
+
+const SELECT_MEMORIES_PROMPT = `You are selecting memories that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their filenames and descriptions.
+
+Return a JSON object with a "selected_memories" array of filenames for the memories that will clearly be useful (up to 5). Only include memories that you are certain will be helpful based on their name and description.
+- If you are unsure if a memory will be useful, do not include it.
+- If no memories would clearly be useful, return an empty array.`;
+
+/** Scan memory directory for file headers without reading full content. */
+export function scanMemoryHeaders(cwd?: string): MemoryHeader[] {
+  const dir = getMemoryDir(cwd);
+  if (!existsSync(dir)) return [];
+
+  const files = readdirSync(dir).filter(
+    (f) => f.endsWith(".md") && f !== "MEMORY.md"
+  );
+
+  const headers: MemoryHeader[] = [];
+  for (const file of files) {
+    const filePath = join(dir, file);
+    try {
+      const raw = readFileSync(filePath, "utf-8");
+      const { meta } = parseFrontmatter(raw);
+      if (meta.name && meta.type) {
+        const stat = statSync(filePath);
+        headers.push({
+          filename: file,
+          filePath,
+          name: meta.name,
+          description: meta.description ?? "",
+          type: meta.type as MemoryType,
+          mtimeMs: stat.mtimeMs,
+        });
+      }
+    } catch {
+      // skip malformed files
+    }
+  }
+  return headers;
+}
+
+/** Format memory headers into a manifest string for the LLM. */
+export function formatMemoryManifest(headers: MemoryHeader[]): string {
+  return headers
+    .map((h) => `- ${h.filename}: [${h.type}] ${h.name} — ${h.description}`)
+    .join("\n");
+}
+
+/** Return a human-readable age string for a memory file. */
+export function memoryAge(mtimeMs: number): string {
+  const diffMs = Date.now() - mtimeMs;
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (days === 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months === 1) return "1 month ago";
+  return `${months} months ago`;
+}
+
+/** Return a staleness warning if the memory is old, or empty string. */
+export function memoryFreshnessWarning(mtimeMs: number): string {
+  const diffMs = Date.now() - mtimeMs;
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (days > 90) return "⚠️ This memory is over 3 months old and may be outdated.";
+  if (days > 30) return "⚠️ This memory is over 1 month old — verify before acting on it.";
+  return "";
+}
+
+/**
+ * Use an LLM side query to select memories relevant to the user's query.
+ * Memories already surfaced in this session are excluded.
+ * Fails silently — memory recall should never block the main loop.
+ */
+export async function selectRelevantMemories(
+  query: string,
+  sideQuery: SideQueryFn,
+  alreadySurfaced: Set<string>,
+  signal?: AbortSignal,
+  cwd?: string,
+): Promise<RelevantMemory[]> {
+  const headers = scanMemoryHeaders(cwd);
+  if (headers.length === 0) return [];
+
+  // Filter out memories already surfaced in this session
+  const candidates = headers.filter((h) => !alreadySurfaced.has(h.filePath));
+  if (candidates.length === 0) return [];
+
+  const manifest = formatMemoryManifest(candidates);
+
+  try {
+    const text = await sideQuery(
+      SELECT_MEMORIES_PROMPT,
+      `Query: ${query}\n\nAvailable memories:\n${manifest}`,
+      signal,
+    );
+
+    // Extract JSON from response (model may wrap in markdown code blocks)
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const selectedFilenames: string[] = parsed.selected_memories || [];
+
+    // Map filenames back to headers, read full content
+    const filenameSet = new Set(selectedFilenames);
+    const selected = candidates.filter((h) => filenameSet.has(h.filename));
+
+    return selected.slice(0, 5).map((h) => {
+      let content = readFileSync(h.filePath, "utf-8");
+      // Per-file truncation (4KB)
+      if (Buffer.byteLength(content) > MAX_MEMORY_BYTES_PER_FILE) {
+        content = content.slice(0, MAX_MEMORY_BYTES_PER_FILE) +
+          "\n\n[... truncated, memory file too large ...]";
+      }
+      const freshness = memoryFreshnessWarning(h.mtimeMs);
+      const headerText = freshness
+        ? `${freshness}\n\nMemory: ${h.filePath}:`
+        : `Memory (saved ${memoryAge(h.mtimeMs)}): ${h.filePath}:`;
+
+      return { path: h.filePath, content, mtimeMs: h.mtimeMs, header: headerText };
+    });
+  } catch (err: any) {
+    // Silent failure -- memory recall should never block the main loop
+    if (signal?.aborted) return [];
+    console.error(`[memory] semantic recall failed: ${err.message}`);
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------

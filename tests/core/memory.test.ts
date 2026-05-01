@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach, describe } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import * as os from "os";
 import {
@@ -12,7 +12,13 @@ import {
   getMemoryDir,
   buildMemoryPromptSection,
   loadMemoryIndex,
+  scanMemoryHeaders,
+  formatMemoryManifest,
+  memoryAge,
+  memoryFreshnessWarning,
+  selectRelevantMemories,
 } from "../../src/core/memory.js";
+import type { SideQueryFn } from "../../src/core/memory.js";
 
 // ---------------------------------------------------------------------------
 // Frontmatter parsing / formatting
@@ -300,5 +306,220 @@ describe("loadMemoryIndex", () => {
     const index = loadMemoryIndex(tmpDir);
     expect(Buffer.byteLength(index)).toBeLessThanOrEqual(25_000 + 200); // small overhead for truncation message
     expect(index).toContain("[... truncated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Semantic recall helpers
+// ---------------------------------------------------------------------------
+
+describe("scanMemoryHeaders", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "nexus-memory-scan-"));
+  });
+
+  afterEach(() => {
+    const memDir = getMemoryDir(tmpDir);
+    try { rmSync(memDir, { recursive: true, force: true }); } catch {}
+    try { rmSync(join(memDir, ".."), { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  test("returns empty array when no memories", () => {
+    expect(scanMemoryHeaders(tmpDir)).toEqual([]);
+  });
+
+  test("returns headers with mtime for saved memories", () => {
+    saveMemory(
+      { name: "role", description: "user role", type: "user", content: "engineer" },
+      tmpDir
+    );
+    const headers = scanMemoryHeaders(tmpDir);
+    expect(headers).toHaveLength(1);
+    expect(headers[0].name).toBe("role");
+    expect(headers[0].type).toBe("user");
+    expect(headers[0].filename).toBe("user_role.md");
+    expect(headers[0].mtimeMs).toBeGreaterThan(0);
+    expect(headers[0].filePath).toContain("user_role.md");
+  });
+});
+
+describe("formatMemoryManifest", () => {
+  test("formats headers into manifest lines", () => {
+    const headers = [
+      { filename: "user_role.md", filePath: "/tmp/user_role.md", name: "role", description: "user role", type: "user" as const, mtimeMs: 1000 },
+      { filename: "feedback_no_mocks.md", filePath: "/tmp/feedback_no_mocks.md", name: "no mocks", description: "testing", type: "feedback" as const, mtimeMs: 2000 },
+    ];
+    const manifest = formatMemoryManifest(headers);
+    expect(manifest).toContain("user_role.md: [user] role — user role");
+    expect(manifest).toContain("feedback_no_mocks.md: [feedback] no mocks — testing");
+  });
+});
+
+describe("memoryAge", () => {
+  test("returns 'today' for recent timestamps", () => {
+    expect(memoryAge(Date.now() - 1000)).toBe("today");
+  });
+
+  test("returns 'yesterday' for 1 day old", () => {
+    expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 - 1000)).toBe("yesterday");
+  });
+
+  test("returns days for under 30 days", () => {
+    expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 * 10)).toBe("10 days ago");
+  });
+
+  test("returns months for over 30 days", () => {
+    expect(memoryAge(Date.now() - 1000 * 60 * 60 * 24 * 60)).toBe("2 months ago");
+  });
+});
+
+describe("memoryFreshnessWarning", () => {
+  test("returns empty for fresh memories", () => {
+    expect(memoryFreshnessWarning(Date.now())).toBe("");
+  });
+
+  test("warns for memories over 30 days old", () => {
+    const warning = memoryFreshnessWarning(Date.now() - 1000 * 60 * 60 * 24 * 45);
+    expect(warning).toContain("over 1 month old");
+  });
+
+  test("warns more strongly for memories over 90 days old", () => {
+    const warning = memoryFreshnessWarning(Date.now() - 1000 * 60 * 60 * 24 * 100);
+    expect(warning).toContain("over 3 months old");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectRelevantMemories
+// ---------------------------------------------------------------------------
+
+describe("selectRelevantMemories", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "nexus-memory-select-"));
+  });
+
+  afterEach(() => {
+    const memDir = getMemoryDir(tmpDir);
+    try { rmSync(memDir, { recursive: true, force: true }); } catch {}
+    try { rmSync(join(memDir, ".."), { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  test("returns empty when no memories exist", async () => {
+    const sideQuery: SideQueryFn = async () => '{"selected_memories": []}';
+    const result = await selectRelevantMemories("test query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  test("selects memories based on sideQuery response", async () => {
+    saveMemory(
+      { name: "db config", description: "database setup", type: "reference", content: "Use postgres on port 5432" },
+      tmpDir
+    );
+    saveMemory(
+      { name: "user role", description: "role info", type: "user", content: "Senior engineer" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () =>
+      '{"selected_memories": ["reference_db_config.md"]}';
+
+    const result = await selectRelevantMemories("database question", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toHaveLength(1);
+    expect(result[0].content).toContain("postgres on port 5432");
+    expect(result[0].header).toContain("Memory");
+  });
+
+  test("skips already-surfaced memories", async () => {
+    saveMemory(
+      { name: "surfaced", description: "already shown", type: "user", content: "old" },
+      tmpDir
+    );
+
+    const memDir = getMemoryDir(tmpDir);
+    const surfacedPath = join(memDir, "user_surfaced.md");
+    const alreadySurfaced = new Set([surfacedPath]);
+
+    const sideQuery: SideQueryFn = async () =>
+      '{"selected_memories": ["user_surfaced.md"]}';
+
+    const result = await selectRelevantMemories("query", sideQuery, alreadySurfaced, undefined, tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  test("handles sideQuery failure gracefully", async () => {
+    saveMemory(
+      { name: "test", description: "test", type: "user", content: "x" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () => { throw new Error("API error"); };
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  test("handles malformed JSON from sideQuery", async () => {
+    saveMemory(
+      { name: "test", description: "test", type: "user", content: "x" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () => "not json at all";
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toEqual([]);
+  });
+
+  test("handles JSON wrapped in markdown code blocks", async () => {
+    saveMemory(
+      { name: "wrapped", description: "test", type: "feedback", content: "content here" },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () =>
+      '```json\n{"selected_memories": ["feedback_wrapped.md"]}\n```';
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toHaveLength(1);
+    expect(result[0].content).toContain("content here");
+  });
+
+  test("truncates large memory files to 4KB", async () => {
+    const largeContent = "x".repeat(8000);
+    saveMemory(
+      { name: "big", description: "large file", type: "project", content: largeContent },
+      tmpDir
+    );
+
+    const sideQuery: SideQueryFn = async () =>
+      '{"selected_memories": ["project_big.md"]}';
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result).toHaveLength(1);
+    expect(Buffer.byteLength(result[0].content)).toBeLessThanOrEqual(4096 + 100);
+    expect(result[0].content).toContain("[... truncated");
+  });
+
+  test("limits selection to 5 memories", async () => {
+    for (let i = 0; i < 8; i++) {
+      saveMemory(
+        { name: `mem ${i}`, description: `desc ${i}`, type: "user", content: `content ${i}` },
+        tmpDir
+      );
+    }
+
+    const sideQuery: SideQueryFn = async () =>
+      JSON.stringify({
+        selected_memories: Array.from({ length: 8 }, (_, i) => `user_mem_${i}.md`),
+      });
+
+    const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
+    expect(result.length).toBeLessThanOrEqual(5);
   });
 });
