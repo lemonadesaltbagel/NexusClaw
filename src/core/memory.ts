@@ -194,6 +194,32 @@ export function deleteMemory(filename: string, cwd?: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Index truncation limits
+// ---------------------------------------------------------------------------
+
+const MAX_INDEX_LINES = 200;
+const MAX_INDEX_BYTES = 25_000;
+
+/** Load and truncate the memory index to safe limits. */
+export function loadMemoryIndex(cwd?: string): string {
+  const indexPath = getIndexPath(cwd);
+  if (!existsSync(indexPath)) return "";
+
+  let content = readFileSync(indexPath, "utf-8");
+
+  const lines = content.split("\n");
+  if (lines.length > MAX_INDEX_LINES) {
+    content = lines.slice(0, MAX_INDEX_LINES).join("\n") +
+      "\n\n[... truncated, too many memory entries ...]";
+  }
+  if (Buffer.byteLength(content) > MAX_INDEX_BYTES) {
+    content = content.slice(0, MAX_INDEX_BYTES) +
+      "\n\n[... truncated, index too large ...]";
+  }
+  return content;
+}
+
+// ---------------------------------------------------------------------------
 // Index maintenance
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,7 @@ import {
   deleteMemory,
   getMemoryDir,
   buildMemoryPromptSection,
+  loadMemoryIndex,
 } from "../../src/core/memory.js";
 
 // ---------------------------------------------------------------------------
@@ -230,5 +231,70 @@ describe("buildMemoryPromptSection", () => {
     expect(section).toContain("Senior engineer");
     expect(section).toContain("[feedback] no mocks");
     expect(section).toContain("Use real DB in tests");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Index truncation
+// ---------------------------------------------------------------------------
+
+describe("loadMemoryIndex", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), "nexus-memory-index-"));
+  });
+
+  afterEach(() => {
+    const memDir = getMemoryDir(tmpDir);
+    try { rmSync(memDir, { recursive: true, force: true }); } catch {}
+    try { rmSync(join(memDir, ".."), { recursive: true, force: true }); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  test("returns empty string when no index exists", () => {
+    expect(loadMemoryIndex(tmpDir)).toBe("");
+  });
+
+  test("returns full index for small memory sets", () => {
+    saveMemory(
+      { name: "small", description: "small entry", type: "user", content: "x" },
+      tmpDir
+    );
+
+    const index = loadMemoryIndex(tmpDir);
+    expect(index).toContain("small");
+    expect(index).not.toContain("truncated");
+  });
+
+  test("truncates index beyond 200 lines", () => {
+    // Create enough memories to exceed 200 lines in the index
+    for (let i = 0; i < 210; i++) {
+      saveMemory(
+        { name: `mem ${i}`, description: `desc ${i}`, type: "user", content: `content ${i}` },
+        tmpDir
+      );
+    }
+
+    const index = loadMemoryIndex(tmpDir);
+    const lines = index.split("\n");
+    // Should be truncated: 200 original lines + blank + truncation message
+    expect(lines.length).toBeLessThan(210 + 5); // well under full count
+    expect(index).toContain("[... truncated, too many memory entries ...]");
+  });
+
+  test("truncates index beyond 25KB", () => {
+    // Create memories with very long descriptions to exceed byte limit
+    const longDesc = "x".repeat(500);
+    for (let i = 0; i < 60; i++) {
+      saveMemory(
+        { name: `big entry ${i}`, description: longDesc, type: "feedback", content: `c${i}` },
+        tmpDir
+      );
+    }
+
+    const index = loadMemoryIndex(tmpDir);
+    expect(Buffer.byteLength(index)).toBeLessThanOrEqual(25_000 + 200); // small overhead for truncation message
+    expect(index).toContain("[... truncated");
   });
 });
