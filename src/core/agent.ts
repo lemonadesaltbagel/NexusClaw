@@ -286,6 +286,17 @@ export class Agent {
   }
 
   // -----------------------------------------------------------------------
+  // Tool dispatch
+  // -----------------------------------------------------------------------
+
+  private async executeToolCall(name: string, input: Record<string, any>): Promise<string> {
+    if (name === "agent") {
+      return this.executeAgentTool(input);
+    }
+    return this.executeTool(name, input);
+  }
+
+  // -----------------------------------------------------------------------
   // Sub-agent execution
   // -----------------------------------------------------------------------
 
@@ -410,7 +421,7 @@ export class Agent {
                   if (!perm || perm.behavior === "allow") {
                     earlyExecutions.set(
                       block.id,
-                      this.executeTool(block.name, block.input),
+                      this.executeToolCall(block.name, block.input as Record<string, any>),
                     );
                   }
                 }
@@ -565,7 +576,7 @@ export class Agent {
               const earlyPromise = earlyExecutions.get(block.id);
               content = earlyPromise
                 ? await earlyPromise
-                : await this.executeTool(block.name, input);
+                : await this.executeToolCall(block.name, input);
             } catch (err) {
               content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
             }
