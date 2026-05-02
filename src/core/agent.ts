@@ -28,6 +28,8 @@ import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
 import { toolDefinitions, type ToolDef } from "@/tools/definitions";
 import { buildSystemPrompt } from "@/core/prompt";
+import { getSubAgentConfig, type SubAgentType } from "@/core/subagent";
+import { printSubAgentStart, printSubAgentEnd } from "@/cli/ui";
 
 const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
 const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
@@ -280,6 +282,39 @@ export class Agent {
       this.outputBuffer.push(text);
     } else {
       this.onText(text);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Sub-agent execution
+  // -----------------------------------------------------------------------
+
+  private async executeAgentTool(input: Record<string, any>): Promise<string> {
+    const type = (input.type || "general") as SubAgentType;
+    const description = input.description || "sub-agent task";
+    const prompt = input.prompt || "";
+
+    printSubAgentStart(type, description);
+
+    const config = getSubAgentConfig(type);
+    const subAgent = new Agent({
+      provider: this.provider,
+      model: this.model,
+      customSystemPrompt: config.systemPrompt,
+      customTools: config.tools,
+      isSubAgent: true,
+      permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+    });
+
+    try {
+      const result = await subAgent.runOnce(prompt);
+      this.totalInputTokens += result.tokens.input;
+      this.totalOutputTokens += result.tokens.output;
+      printSubAgentEnd(type, description);
+      return result.text || "(Sub-agent produced no output)";
+    } catch (e: any) {
+      printSubAgentEnd(type, description);
+      return `Sub-agent error: ${e.message}`;
     }
   }
 

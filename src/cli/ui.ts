@@ -69,3 +69,11 @@ export function printToolResult(name: string, result: string): void {
       : result;
   console.log(chalk.dim(truncated.split("\n").map((l) => "  " + l).join("\n")));
 }
+
+export function printSubAgentStart(type: string, description: string): void {
+  console.log(chalk.cyan(`\n  🤖 Sub-agent [${type}]: ${description}`));
+}
+
+export function printSubAgentEnd(type: string, description: string): void {
+  console.log(chalk.cyan(`  ✓ Sub-agent [${type}] done: ${description}`));
+}
