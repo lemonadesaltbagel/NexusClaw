@@ -71,9 +71,9 @@ export function printToolResult(name: string, result: string): void {
 }
 
 export function printSubAgentStart(type: string, description: string): void {
-  console.log(chalk.cyan(`\n  🤖 Sub-agent [${type}]: ${description}`));
+  console.log(chalk.magenta(`\n  ┌─ Sub-agent [${type}]: ${description}`));
 }
 
 export function printSubAgentEnd(type: string, description: string): void {
-  console.log(chalk.cyan(`  ✓ Sub-agent [${type}] done: ${description}`));
+  console.log(chalk.magenta(`  └─ Sub-agent [${type}] completed`));
 }
