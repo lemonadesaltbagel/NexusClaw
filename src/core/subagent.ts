@@ -11,6 +11,11 @@ import { toolDefinitions, type ToolDef } from "../tools/definitions.js";
 
 export type SubAgentType = "explore" | "plan" | "general";
 
+export interface SubAgentConfig {
+  systemPrompt: string;
+  tools: ToolDef[];
+}
+
 // ---------------------------------------------------------------------------
 // Read-only tool set — used by "explore" and "plan" agents that should
 // never mutate the filesystem or execute arbitrary commands.
@@ -28,64 +33,87 @@ export function getReadOnlyTools(): ToolDef[] {
 }
 
 // ---------------------------------------------------------------------------
-// Per-type configuration
+// Built-in agent prompts
 // ---------------------------------------------------------------------------
 
-export interface SubAgentConfig {
-  type: SubAgentType;
-  description: string;
-  /** Tools available to this agent type. `undefined` means all tools. */
-  tools: ToolDef[] | undefined;
-  /** System prompt preamble injected before the main system prompt. */
-  systemPrefix: string;
-}
+const EXPLORE_PROMPT = `You are an Explore agent — a fast, READ-ONLY sub-agent \
+specialized for codebase research and investigation.
 
-const SUBAGENT_CONFIGS: Record<SubAgentType, SubAgentConfig> = {
-  explore: {
-    type: "explore",
-    description:
-      "Read-only exploration agent for codebase research — searches files, " +
-      "reads code, and runs non-destructive shell commands.",
-    tools: getReadOnlyTools(),
-    systemPrefix:
-      "You are an exploration sub-agent. You can only read and search — " +
-      "do NOT attempt to modify any files. Report your findings concisely.",
-  },
-  plan: {
-    type: "plan",
-    description:
-      "Planning agent that analyzes the codebase and produces a step-by-step plan. " +
-      "Read-only — cannot modify files.",
-    tools: getReadOnlyTools(),
-    systemPrefix:
-      "You are a planning sub-agent. Analyze the codebase using read-only tools " +
-      "and produce a clear, actionable plan. Do NOT modify any files.",
-  },
-  general: {
-    type: "general",
-    description:
-      "General-purpose sub-agent with full tool access for executing tasks.",
-    tools: undefined,
-    systemPrefix:
-      "You are a general-purpose sub-agent. Complete the assigned task, " +
-      "then report back concisely.",
-  },
-};
+Your job:
+- Search and read files to answer questions about the codebase
+- Find relevant code patterns, definitions, and usages
+- Trace through call chains and data flows
+
+IMPORTANT CONSTRAINTS:
+- You are READ-ONLY. Do NOT modify any files.
+- If using run_shell, only use read commands (ls, cat, find, grep, git log, etc.)
+- Do NOT use write, edit, rm, mv, or any destructive shell commands.
+
+Be fast and thorough. Use multiple tool calls when possible.
+Return a concise summary of your findings.`;
+
+const PLAN_PROMPT = `You are a Plan agent — a READ-ONLY sub-agent specialized \
+for designing implementation plans.
+
+Your job:
+- Analyze the codebase to understand the current architecture
+- Design a step-by-step implementation plan
+- Identify critical files that need modification
+- Consider architectural trade-offs
+
+IMPORTANT CONSTRAINTS:
+- You are READ-ONLY. Do NOT modify any files.
+- If using run_shell, only use read commands (ls, cat, find, grep, git log, etc.)
+- Do NOT use write, edit, rm, mv, or any destructive shell commands.
+
+Return a structured plan with:
+1. Summary of current state
+2. Step-by-step implementation steps
+3. Critical files for implementation
+4. Potential risks or considerations`;
+
+const GENERAL_PROMPT = `You are a General sub-agent handling an independent task.
+Complete the assigned task and return a concise result. You have access to all tools.`;
+
+// ---------------------------------------------------------------------------
+// Config lookup
+// ---------------------------------------------------------------------------
 
 /** Look up configuration for a given sub-agent type. */
 export function getSubAgentConfig(type: SubAgentType): SubAgentConfig {
-  return SUBAGENT_CONFIGS[type];
+  switch (type) {
+    case "explore":
+      return { systemPrompt: EXPLORE_PROMPT, tools: getReadOnlyTools() };
+    case "plan":
+      return { systemPrompt: PLAN_PROMPT, tools: getReadOnlyTools() };
+    case "general":
+      return {
+        systemPrompt: GENERAL_PROMPT,
+        tools: toolDefinitions.filter((t) => t.name !== "agent"),
+      };
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Agent descriptions for the system prompt
 // ---------------------------------------------------------------------------
 
+const BUILTIN_DESCRIPTIONS: Record<SubAgentType, string> = {
+  explore:
+    "Read-only exploration agent for codebase research — searches files, " +
+    "reads code, and runs non-destructive shell commands.",
+  plan:
+    "Planning agent that analyzes the codebase and produces a step-by-step plan. " +
+    "Read-only — cannot modify files.",
+  general:
+    "General-purpose sub-agent with full tool access for executing tasks.",
+};
+
 /** Build agent descriptions for the system prompt. */
 export function buildAgentDescriptions(): string {
   const lines: string[] = [];
-  for (const config of Object.values(SUBAGENT_CONFIGS)) {
-    lines.push(`- **${config.type}**: ${config.description}`);
+  for (const [type, desc] of Object.entries(BUILTIN_DESCRIPTIONS)) {
+    lines.push(`- **${type}**: ${desc}`);
   }
   return lines.length > 0
     ? `\n\n# Available sub-agents\n${lines.join("\n")}`
