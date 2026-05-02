@@ -267,7 +267,9 @@ export class Agent {
       return await this.runTurn(userMessage);
     } finally {
       this.abortController = null;
-      this.autoSave();
+      if (!this.isSubAgent) {
+        this.autoSave();
+      }
     }
   }
 
