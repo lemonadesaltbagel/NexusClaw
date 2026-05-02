@@ -202,6 +202,23 @@ export class Agent {
     return text;
   }
 
+  /** One-shot execution: run a prompt, collect all output, and return text + token usage. */
+  async runOnce(prompt: string): Promise<{ text: string; tokens: { input: number; output: number } }> {
+    this.outputBuffer = [];
+    const prevInput = this.totalInputTokens;
+    const prevOutput = this.totalOutputTokens;
+    await this.chat(prompt);
+    const text = this.outputBuffer.join("");
+    this.outputBuffer = null;
+    return {
+      text,
+      tokens: {
+        input: this.totalInputTokens - prevInput,
+        output: this.totalOutputTokens - prevOutput,
+      },
+    };
+  }
+
   /** Persist the current session to disk. */
   private autoSave(): void {
     try {
