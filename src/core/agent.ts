@@ -120,6 +120,7 @@ export class Agent {
   private effectiveWindow = 200_000;
   private lastApiCallTime: number | null = null;
   private isSubAgent: boolean;
+  private outputBuffer: string[] | null = null;
   private alreadySurfacedMemories = new Set<string>();
   private sessionMemoryBytes = 0;
 
@@ -130,6 +131,7 @@ export class Agent {
     this.systemPrompt = options.customSystemPrompt ?? buildSystemPrompt();
     this.tools = options.customTools ?? toolDefinitions;
     this.isSubAgent = options.isSubAgent ?? false;
+    this.outputBuffer = this.isSubAgent ? [] : null;
 
     this.thinkingMode = options.thinkingMode ?? "disabled";
     this.concurrencySafeTools = options.concurrencySafeTools ?? new Set();
@@ -192,6 +194,14 @@ export class Agent {
     return this.model;
   }
 
+  /** Retrieve and clear the collected sub-agent output. Returns null for main agents. */
+  drainOutput(): string | null {
+    if (!this.outputBuffer) return null;
+    const text = this.outputBuffer.join("");
+    this.outputBuffer = [];
+    return text;
+  }
+
   /** Persist the current session to disk. */
   private autoSave(): void {
     try {
@@ -245,6 +255,15 @@ export class Agent {
   /** Cancel the in-flight turn (streaming API call + tool execution). */
   abort(): void {
     this.abortController?.abort();
+  }
+
+  /** Route text output: sub-agents collect into buffer, main agents print directly. */
+  private emitText(text: string): void {
+    if (this.outputBuffer) {
+      this.outputBuffer.push(text);
+    } else {
+      this.onText(text);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -332,7 +351,7 @@ export class Agent {
               tools: this.tools,
               thinkingMode: this.thinkingMode,
               signal,
-              onText: (delta) => this.onText(delta),
+              onText: (delta) => this.emitText(delta),
               onToolUse: (block) => {
                 if (this.concurrencySafeTools.has(block.name)) {
                   const perm = this.checkPermission?.(block.name, block.input);
