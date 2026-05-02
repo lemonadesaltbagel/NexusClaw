@@ -177,6 +177,32 @@ export const toolDefinitions: ToolDef[] = [
     },
   },
   {
+    name: "agent",
+    description:
+      "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context " +
+      "and return their result. Types: 'explore' (read-only, fast search), " +
+      "'plan' (read-only, structured planning), 'general' (full tools).",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        description: {
+          type: "string",
+          description: "Short (3-5 word) description of the sub-agent's task",
+        },
+        prompt: {
+          type: "string",
+          description: "Detailed task instructions for the sub-agent",
+        },
+        type: {
+          type: "string",
+          enum: ["explore", "plan", "general"],
+          description: "Agent type. Default: general",
+        },
+      },
+      required: ["description", "prompt"],
+    },
+  },
+  {
     name: "tool_search",
     description:
       "Search for available tools by name or keyword. Returns full schemas for matching deferred tools and activates them for use.",
