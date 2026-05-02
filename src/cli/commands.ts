@@ -89,15 +89,15 @@ export const chatCommand = new Command("chat")
 
     // --- Build system prompt and tools ---
     const system = buildSystemPrompt();
-    const tools = getActiveToolDefinitions() as Anthropic.Messages.Tool[];
+    const tools = getActiveToolDefinitions();
 
     // --- Create agent ---
     const agent = new Agent({
       provider,
       providerType: args.apiBase ? "openai" : "anthropic",
       model: args.model,
-      system,
-      tools,
+      customSystemPrompt: system,
+      customTools: tools,
       executeTool,
       onText: (delta) => process.stdout.write(delta),
       onToolCall: printToolCall,

@@ -26,6 +26,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
+import { toolDefinitions, type ToolDef } from "@/tools/definitions";
+import { buildSystemPrompt } from "@/core/prompt";
 
 const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
 const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
@@ -44,8 +46,12 @@ export interface AgentOptions {
   provider: Provider;
   model?: string;
   maxTokens?: number;
-  system?: string | Anthropic.Messages.TextBlockParam[];
-  tools?: Anthropic.Messages.Tool[];
+  /** Custom system prompt. Defaults to buildSystemPrompt(). */
+  customSystemPrompt?: string | Anthropic.Messages.TextBlockParam[];
+  /** Custom tool definitions. Defaults to toolDefinitions. */
+  customTools?: ToolDef[];
+  /** Whether this agent is a sub-agent (disables memory prefetch). */
+  isSubAgent?: boolean;
   /** Execute a tool call. Returns the string result to send back to the model. */
   executeTool?: (name: string, input: Record<string, unknown>) => Promise<string>;
   /** Collapse pending cacheable context to free token space. Returns compacted messages. */
@@ -79,16 +85,14 @@ export interface AgentOptions {
   confirmDangerous?: (message: string) => Promise<boolean>;
   /** Provider type — affects compaction strategy (OpenAI has system as a message). */
   providerType?: "anthropic" | "openai";
-  /** Whether this agent is a sub-agent (disables memory prefetch). */
-  isSubAgent?: boolean;
 }
 
 export class Agent {
   private provider: Provider;
   private model: string;
   private maxTokens: number;
-  private system?: string | Anthropic.Messages.TextBlockParam[];
-  private tools?: Anthropic.Messages.Tool[];
+  private systemPrompt: string | Anthropic.Messages.TextBlockParam[];
+  private tools: ToolDef[];
   private messages: MessageParam[] = [];
 
   private executeTool: NonNullable<AgentOptions["executeTool"]>;
@@ -123,8 +127,9 @@ export class Agent {
     this.provider = options.provider;
     this.model = options.model ?? "claude-sonnet-4-5-20250514";
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-    this.system = options.system;
-    this.tools = options.tools;
+    this.systemPrompt = options.customSystemPrompt ?? buildSystemPrompt();
+    this.tools = options.customTools ?? toolDefinitions;
+    this.isSubAgent = options.isSubAgent ?? false;
 
     this.thinkingMode = options.thinkingMode ?? "disabled";
     this.concurrencySafeTools = options.concurrencySafeTools ?? new Set();
@@ -132,7 +137,6 @@ export class Agent {
     this.permissionMode = options.permissionMode ?? "default";
     this.planFilePath = options.planFilePath;
     this.providerType = options.providerType ?? "anthropic";
-    this.isSubAgent = options.isSubAgent ?? false;
     this.confirmDangerous =
       options.confirmDangerous ?? (async () => false);
 
@@ -324,7 +328,7 @@ export class Agent {
               model: this.model,
               maxTokens: currentMaxTokens,
               messages: this.messages,
-              system: this.system,
+              system: this.systemPrompt,
               tools: this.tools,
               thinkingMode: this.thinkingMode,
               signal,
@@ -851,7 +855,7 @@ export class Agent {
         ? summaryResp.content[0].text
         : "No summary available.";
 
-    // Reset messages — the original this.system is preserved separately
+    // Reset messages — the original this.systemPrompt is preserved separately
     // and will be re-prepended by the OpenAI provider on the next call.
     this.messages = [
       {
