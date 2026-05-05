@@ -197,11 +197,6 @@ export class McpManager {
   private connections = new Map<string, McpConnection>();
   private tools: McpToolInfo[] = [];
   private connected = false;
-  /** Maps prefixed tool name ("mcp__server__tool") → { connection, originalName } */
-  private toolMap = new Map<
-    string,
-    { connection: McpConnection; originalName: string }
-  >();
 
   // -----------------------------------------------------------------------
   // Configuration Loading
@@ -290,15 +285,6 @@ export class McpManager {
         this.connections.set(name, conn);
         this.tools.push(...serverTools);
 
-        // Build the prefixed tool map for dispatch
-        for (const tool of serverTools) {
-          const prefixedName = `mcp__${name}__${tool.name}`;
-          this.toolMap.set(prefixedName, {
-            connection: conn,
-            originalName: tool.name,
-          });
-        }
-
         console.error(
           `[mcp] Connected to '${name}' — ${serverTools.length} tools`,
         );
@@ -312,47 +298,29 @@ export class McpManager {
   }
 
   /** Return agent-compatible tool definitions for all discovered MCP tools. */
-  getToolDefinitions(): Array<{
-    name: string;
-    description: string;
-    input_schema: {
-      type: "object";
-      properties: Record<string, unknown>;
-      required?: string[];
-    };
-  }> {
-    return this.tools.map((tool) => ({
-      name: `mcp__${tool.serverName}__${tool.name}`,
-      description: tool.description
-        ? `[MCP/${tool.serverName}] ${tool.description}`
-        : `[MCP/${tool.serverName}] ${tool.name}`,
-      input_schema: {
-        type: "object" as const,
-        properties: tool.inputSchema?.properties ?? {},
-        required: tool.inputSchema?.required,
-      },
+  getToolDefinitions(): Array<{ name: string; description: string; input_schema: any }> {
+    return this.tools.map((t) => ({
+      name: `mcp__${t.serverName}__${t.name}`,
+      description: t.description || `MCP tool ${t.name} from ${t.serverName}`,
+      input_schema: t.inputSchema || { type: "object", properties: {} },
     }));
-  }
-
-  /** Call an MCP tool by its prefixed name. */
-  async callTool(
-    prefixedName: string,
-    input: Record<string, unknown>,
-  ): Promise<string> {
-    const entry = this.toolMap.get(prefixedName);
-    if (!entry) {
-      return `Unknown MCP tool: ${prefixedName}`;
-    }
-    try {
-      return await entry.connection.callTool(entry.originalName, input);
-    } catch (err) {
-      return `MCP tool error: ${err instanceof Error ? err.message : String(err)}`;
-    }
   }
 
   /** Check if a tool name belongs to MCP. */
   isMcpTool(name: string): boolean {
-    return this.toolMap.has(name);
+    return name.startsWith("mcp__");
+  }
+
+  /** Route a prefixed tool call to the correct server connection. */
+  async callTool(prefixedName: string, args: any): Promise<string> {
+    // mcp__serverName__toolName → serverName, toolName
+    const parts = prefixedName.split("__");
+    if (parts.length < 3) throw new Error(`Invalid MCP tool name: ${prefixedName}`);
+    const serverName = parts[1]!;
+    const toolName = parts.slice(2).join("__"); // Tool name might contain __
+    const conn = this.connections.get(serverName);
+    if (!conn) throw new Error(`MCP server '${serverName}' not connected`);
+    return conn.callTool(toolName, args);
   }
 
   /** Close all MCP server connections. */
@@ -361,7 +329,6 @@ export class McpManager {
       conn.close();
     }
     this.connections.clear();
-    this.toolMap.clear();
     this.tools = [];
   }
 
@@ -372,6 +339,6 @@ export class McpManager {
 
   /** Number of available MCP tools. */
   get toolCount(): number {
-    return this.toolMap.size;
+    return this.tools.length;
   }
 }
