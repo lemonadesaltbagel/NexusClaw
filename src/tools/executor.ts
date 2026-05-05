@@ -5,8 +5,7 @@
 
 import { resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { readFile } from "@/tools/handlers/read_file";
-import { writeFile } from "@/tools/handlers/write_file";
+import { readFile, writeFile } from "@/tools/handlers/file_ops";
 import { editFile } from "@/tools/handlers/edit_file";
 import { listFiles } from "@/tools/handlers/list_files";
 import { grepSearch } from "@/tools/handlers/grep_search";

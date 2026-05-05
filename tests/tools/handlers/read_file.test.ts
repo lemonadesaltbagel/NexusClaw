@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { readFile } from "@/tools/handlers/read_file";
+import { readFile } from "@/tools/handlers/file_ops";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

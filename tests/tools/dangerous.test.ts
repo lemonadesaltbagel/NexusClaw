@@ -11,7 +11,7 @@ import {
   loadPermissionRules,
   resetPermissionRulesCache,
   type ParsedRule,
-} from "./dangerous";
+} from "@/tools/dangerous";
 
 // ---------------------------------------------------------------------------
 // isDangerous
