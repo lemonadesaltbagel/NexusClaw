@@ -26,6 +26,10 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import type { Provider } from "@/core/provider";
 import { isPromptTooLongError } from "@/core/providers/anthropic";
 import { withRetry } from "@/core/retry";
+import { toolDefinitions, type ToolDef } from "@/tools/definitions";
+import { buildSystemPrompt } from "@/core/prompt";
+import { getSubAgentConfig, type SubAgentType } from "@/core/subagent";
+import { printSubAgentStart, printSubAgentEnd } from "@/cli/ui";
 
 const SNIPPABLE_TOOLS = new Set(["read_file", "grep_search", "list_files", "run_shell"]);
 const SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
@@ -49,8 +53,12 @@ export interface AgentOptions {
   provider: Provider;
   model?: string;
   maxTokens?: number;
-  system?: string | Anthropic.Messages.TextBlockParam[];
-  tools?: Anthropic.Messages.Tool[];
+  /** Custom system prompt. Defaults to buildSystemPrompt(). */
+  customSystemPrompt?: string | Anthropic.Messages.TextBlockParam[];
+  /** Custom tool definitions. Defaults to toolDefinitions. */
+  customTools?: ToolDef[];
+  /** Whether this agent is a sub-agent (disables memory prefetch). */
+  isSubAgent?: boolean;
   /** Execute a tool call. Returns the string result to send back to the model. */
   executeTool?: (name: string, input: Record<string, unknown>) => Promise<string>;
   /** Collapse pending cacheable context to free token space. Returns compacted messages. */
@@ -86,16 +94,14 @@ export interface AgentOptions {
   planApprovalFn?: (planContent: string) => Promise<PlanApprovalResult>;
   /** Provider type — affects compaction strategy (OpenAI has system as a message). */
   providerType?: "anthropic" | "openai";
-  /** Whether this agent is a sub-agent (disables memory prefetch). */
-  isSubAgent?: boolean;
 }
 
 export class Agent {
   private provider: Provider;
   private model: string;
   private maxTokens: number;
-  private system?: string | Anthropic.Messages.TextBlockParam[];
-  private tools?: Anthropic.Messages.Tool[];
+  private systemPrompt: string | Anthropic.Messages.TextBlockParam[];
+  private tools: ToolDef[];
   private messages: MessageParam[] = [];
 
   private executeTool: NonNullable<AgentOptions["executeTool"]>;
@@ -127,6 +133,7 @@ export class Agent {
   private effectiveWindow = 200_000;
   private lastApiCallTime: number | null = null;
   private isSubAgent: boolean;
+  private outputBuffer: string[] | null = null;
   private alreadySurfacedMemories = new Set<string>();
   private sessionMemoryBytes = 0;
 
@@ -134,9 +141,11 @@ export class Agent {
     this.provider = options.provider;
     this.model = options.model ?? "claude-sonnet-4-5-20250514";
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-    this.system = options.system;
-    this.baseSystemPrompt = options.system;
-    this.tools = options.tools;
+    this.systemPrompt = options.customSystemPrompt ?? buildSystemPrompt();
+    this.baseSystemPrompt = options.customSystemPrompt ?? buildSystemPrompt();
+    this.tools = options.customTools ?? toolDefinitions;
+    this.isSubAgent = options.isSubAgent ?? false;
+    this.outputBuffer = this.isSubAgent ? [] : null;
 
     this.thinkingMode = options.thinkingMode ?? "disabled";
     this.concurrencySafeTools = options.concurrencySafeTools ?? new Set();
@@ -144,7 +153,6 @@ export class Agent {
     this.permissionMode = options.permissionMode ?? "default";
     this.planFilePath = options.planFilePath;
     this.providerType = options.providerType ?? "anthropic";
-    this.isSubAgent = options.isSubAgent ?? false;
     this.confirmDangerous =
       options.confirmDangerous ?? (async () => false);
     this.planApprovalFn = options.planApprovalFn;
@@ -206,6 +214,31 @@ export class Agent {
     this.planApprovalFn = fn;
   }
 
+  /** Retrieve and clear the collected sub-agent output. Returns null for main agents. */
+  drainOutput(): string | null {
+    if (!this.outputBuffer) return null;
+    const text = this.outputBuffer.join("");
+    this.outputBuffer = [];
+    return text;
+  }
+
+  /** One-shot execution: run a prompt, collect all output, and return text + token usage. */
+  async runOnce(prompt: string): Promise<{ text: string; tokens: { input: number; output: number } }> {
+    this.outputBuffer = [];
+    const prevInput = this.totalInputTokens;
+    const prevOutput = this.totalOutputTokens;
+    await this.chat(prompt);
+    const text = this.outputBuffer.join("");
+    this.outputBuffer = null;
+    return {
+      text,
+      tokens: {
+        input: this.totalInputTokens - prevInput,
+        output: this.totalOutputTokens - prevOutput,
+      },
+    };
+  }
+
   /** Persist the current session to disk. */
   private autoSave(): void {
     try {
@@ -247,7 +280,7 @@ export class Agent {
       this.permissionMode = this.prePlanMode || "default";
       this.prePlanMode = null;
       this.planFilePath = undefined;
-      this.system = this.baseSystemPrompt;
+      this.systemPrompt = this.baseSystemPrompt;
       console.error(`  ℹ Exited plan mode → ${this.permissionMode} mode`);
       return this.permissionMode;
     } else {
@@ -255,7 +288,7 @@ export class Agent {
       this.prePlanMode = this.permissionMode;
       this.permissionMode = "plan";
       this.planFilePath = this.generatePlanFilePath();
-      this.system = this.buildPlanModePrompt();
+      this.systemPrompt = this.buildPlanModePrompt();
       console.error(`  ℹ Entered plan mode. Plan file: ${this.planFilePath}`);
       return "plan";
     }
@@ -320,7 +353,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       this.prePlanMode = this.permissionMode;
       this.permissionMode = "plan";
       this.planFilePath = this.generatePlanFilePath();
-      this.system = this.buildPlanModePrompt();
+      this.systemPrompt = this.buildPlanModePrompt();
       console.error("  ℹ Entered plan mode (read-only). Plan file: " + this.planFilePath);
       return `Entered plan mode. You are now in read-only mode.\n\n` +
         `Your plan file: ${this.planFilePath}\n` +
@@ -363,7 +396,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
         this.prePlanMode = null;
         const savedPlanPath = this.planFilePath;
         this.planFilePath = undefined;
-        this.system = this.baseSystemPrompt;
+        this.systemPrompt = this.baseSystemPrompt;
 
         // Clear context (if clear-and-execute was chosen)
         if (result.choice === "clear-and-execute") {
@@ -383,7 +416,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       this.permissionMode = this.prePlanMode || "default";
       this.prePlanMode = null;
       this.planFilePath = undefined;
-      this.system = this.baseSystemPrompt;
+      this.systemPrompt = this.baseSystemPrompt;
       console.error("  ℹ Exited plan mode. Restored to " + this.permissionMode + " mode.");
       return `Exited plan mode. Permission mode restored to: ${this.permissionMode}\n\n` +
         `## Your Plan:\n${planContent}`;
@@ -399,13 +432,68 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       return await this.runTurn(userMessage);
     } finally {
       this.abortController = null;
-      this.autoSave();
+      if (!this.isSubAgent) {
+        this.autoSave();
+      }
     }
   }
 
   /** Cancel the in-flight turn (streaming API call + tool execution). */
   abort(): void {
     this.abortController?.abort();
+  }
+
+  /** Route text output: sub-agents collect into buffer, main agents print directly. */
+  private emitText(text: string): void {
+    if (this.outputBuffer) {
+      this.outputBuffer.push(text);
+    } else {
+      this.onText(text);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Tool dispatch
+  // -----------------------------------------------------------------------
+
+  private async executeToolCall(name: string, input: Record<string, any>): Promise<string> {
+    if (name === "agent") {
+      return this.executeAgentTool(input);
+    }
+    return this.executeTool(name, input);
+  }
+
+  // -----------------------------------------------------------------------
+  // Sub-agent execution
+  // -----------------------------------------------------------------------
+
+  private async executeAgentTool(input: Record<string, any>): Promise<string> {
+    const type = (input.type || "general") as SubAgentType;
+    const description = input.description || "sub-agent task";
+    const prompt = input.prompt || "";
+
+    printSubAgentStart(type, description);
+
+    const config = getSubAgentConfig(type);
+    const subAgent = new Agent({
+      provider: this.provider,
+      model: this.model,
+      customSystemPrompt: config.systemPrompt,
+      customTools: config.tools,
+      isSubAgent: true,
+      permissionMode: this.permissionMode === "plan" ? "plan" : "bypassPermissions",
+    });
+
+    try {
+      const result = await subAgent.runOnce(prompt);
+      this.totalInputTokens += result.tokens.input;
+      this.totalOutputTokens += result.tokens.output;
+      printSubAgentEnd(type, description);
+      return result.text || "(Sub-agent produced no output)";
+    } catch (e: any) {
+      printSubAgentEnd(type, description);
+      return `Sub-agent error: ${e.message}`;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -489,18 +577,18 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
               model: this.model,
               maxTokens: currentMaxTokens,
               messages: this.messages,
-              system: this.system,
+              system: this.systemPrompt,
               tools: this.tools,
               thinkingMode: this.thinkingMode,
               signal,
-              onText: (delta) => this.onText(delta),
+              onText: (delta) => this.emitText(delta),
               onToolUse: (block) => {
                 if (this.concurrencySafeTools.has(block.name)) {
                   const perm = this.checkPermission?.(block.name, block.input);
                   if (!perm || perm.behavior === "allow") {
                     earlyExecutions.set(
                       block.id,
-                      this.executeTool(block.name, block.input),
+                      this.executeToolCall(block.name, block.input as Record<string, any>),
                     );
                   }
                 }
@@ -655,7 +743,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
               const earlyPromise = earlyExecutions.get(block.id);
               content = earlyPromise
                 ? await earlyPromise
-                : await this.executeTool(block.name, input);
+                : await this.executeToolCall(block.name, input);
             } catch (err) {
               content = `Error executing tool ${block.name}: ${err instanceof Error ? err.message : String(err)}`;
             }
@@ -1020,7 +1108,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
         ? summaryResp.content[0].text
         : "No summary available.";
 
-    // Reset messages — the original this.system is preserved separately
+    // Reset messages — the original this.systemPrompt is preserved separately
     // and will be re-prepended by the OpenAI provider on the next call.
     this.messages = [
       {

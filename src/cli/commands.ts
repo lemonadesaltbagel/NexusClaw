@@ -91,7 +91,7 @@ export const chatCommand = new Command("chat")
 
     // --- Build system prompt and tools ---
     const system = buildSystemPrompt();
-    const tools = getActiveToolDefinitions() as Anthropic.Messages.Tool[];
+    const tools = getActiveToolDefinitions();
 
     // --- Initialize MCP servers ---
     const mcpManager = new McpManager();
@@ -116,8 +116,8 @@ export const chatCommand = new Command("chat")
       provider,
       providerType: args.apiBase ? "openai" : "anthropic",
       model: args.model,
-      system,
-      tools,
+      customSystemPrompt: system,
+      customTools: tools,
       executeTool,
       onText: (delta) => process.stdout.write(delta),
       onToolCall: printToolCall,

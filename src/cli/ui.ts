@@ -91,3 +91,11 @@ export function printPlanApprovalOptions(): void {
   console.log("    3) Yes, manually approve edits — keep context, confirm each edit");
   console.log("    4) No, keep planning — provide feedback to revise");
 }
+
+export function printSubAgentStart(type: string, description: string): void {
+  console.log(chalk.magenta(`\n  ┌─ Sub-agent [${type}]: ${description}`));
+}
+
+export function printSubAgentEnd(type: string, description: string): void {
+  console.log(chalk.magenta(`  └─ Sub-agent [${type}] completed`));
+}

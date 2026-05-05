@@ -848,7 +848,7 @@ describe("auto-compact", () => {
     const agent = new Agent({
       provider,
       providerType: "openai",
-      system: "You are a helpful coding assistant.",
+      customSystemPrompt: "You are a helpful coding assistant.",
       executeTool: async () => "file content",
     });
 
