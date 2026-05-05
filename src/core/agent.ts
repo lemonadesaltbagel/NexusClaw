@@ -122,7 +122,7 @@ export class Agent {
   private providerType: "anthropic" | "openai";
   private confirmedPaths: Set<string> = new Set();
   private prePlanMode: PermissionMode | null = null;
-  private baseSystemPrompt: string | Anthropic.Messages.TextBlockParam[] | undefined;
+  private baseSystemPrompt: string | Anthropic.Messages.TextBlockParam[];
   private contextCleared: boolean = false;
   private abortController: AbortController | null = null;
   private sessionId: string = crypto.randomUUID();
