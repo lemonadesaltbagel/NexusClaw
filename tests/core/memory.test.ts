@@ -271,8 +271,8 @@ describe("memory CRUD", () => {
 
     const memories = listMemories(tmpDir);
     expect(memories).toHaveLength(1);
-    expect(memories[0].content).toBe("version 2");
-    expect(memories[0].description).toBe("v2");
+    expect(memories[0]!.content).toBe("version 2");
+    expect(memories[0]!.description).toBe("v2");
   });
 });
 
@@ -428,11 +428,11 @@ describe("scanMemoryHeaders", () => {
     );
     const headers = scanMemoryHeaders(tmpDir);
     expect(headers).toHaveLength(1);
-    expect(headers[0].name).toBe("role");
-    expect(headers[0].type).toBe("user");
-    expect(headers[0].filename).toBe("user_role.md");
-    expect(headers[0].mtimeMs).toBeGreaterThan(0);
-    expect(headers[0].filePath).toContain("user_role.md");
+    expect(headers[0]!.name).toBe("role");
+    expect(headers[0]!.type).toBe("user");
+    expect(headers[0]!.filename).toBe("user_role.md");
+    expect(headers[0]!.mtimeMs).toBeGreaterThan(0);
+    expect(headers[0]!.filePath).toContain("user_role.md");
   });
 
   test("returns multiple headers sorted", () => {
@@ -455,7 +455,7 @@ describe("scanMemoryHeaders", () => {
 
     const headers = scanMemoryHeaders(tmpDir);
     expect(headers).toHaveLength(1);
-    expect(headers[0].name).toBe("valid");
+    expect(headers[0]!.name).toBe("valid");
   });
 });
 
@@ -548,8 +548,8 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("database question", sideQuery, new Set(), undefined, tmpDir);
     expect(result).toHaveLength(1);
-    expect(result[0].content).toContain("postgres on port 5432");
-    expect(result[0].header).toContain("Memory");
+    expect(result[0]!.content).toContain("postgres on port 5432");
+    expect(result[0]!.header).toContain("Memory");
   });
 
   test("skips already-surfaced memories", async () => {
@@ -604,7 +604,7 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
     expect(result).toHaveLength(1);
-    expect(result[0].content).toContain("content here");
+    expect(result[0]!.content).toContain("content here");
   });
 
   test("truncates large memory files to 4KB", async () => {
@@ -619,8 +619,8 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
     expect(result).toHaveLength(1);
-    expect(Buffer.byteLength(result[0].content)).toBeLessThanOrEqual(4096 + 100);
-    expect(result[0].content).toContain("[... truncated");
+    expect(Buffer.byteLength(result[0]!.content)).toBeLessThanOrEqual(4096 + 100);
+    expect(result[0]!.content).toContain("[... truncated");
   });
 
   test("passes query text to sideQuery", async () => {
@@ -651,10 +651,10 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
     expect(result).toHaveLength(1);
-    expect(result[0].header).toContain("Memory");
-    expect(result[0].header).toContain("user_fresh.md");
+    expect(result[0]!.header).toContain("Memory");
+    expect(result[0]!.header).toContain("user_fresh.md");
     // Fresh memory should not have a staleness warning
-    expect(result[0].header).not.toContain("⚠️");
+    expect(result[0]!.header).not.toContain("⚠️");
   });
 
   test("returns empty on aborted signal", async () => {
@@ -686,7 +686,7 @@ describe("selectRelevantMemories", () => {
 
     const result = await selectRelevantMemories("query", sideQuery, new Set(), undefined, tmpDir);
     expect(result).toHaveLength(1);
-    expect(result[0].content).toContain("yes");
+    expect(result[0]!.content).toContain("yes");
   });
 
   test("limits selection to 5 memories", async () => {

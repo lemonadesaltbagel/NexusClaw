@@ -5,6 +5,7 @@ import type { Message } from "@/core/types";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { mockUsage, mockTextBlock, mockToolUseBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -13,17 +14,12 @@ import { homedir } from "node:os";
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
+  return mockMessage({
     model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
+    content: overrides.content ?? [mockTextBlock("Hello")],
+    usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     ...overrides,
-  };
+  });
 }
 
 function mockProvider(
@@ -34,10 +30,10 @@ function mockProvider(
 
 function sequenceProvider(messages: Message[]): Provider {
   let callIndex = 0;
-  return mockProvider(() => messages[callIndex++]);
+  return mockProvider(() => messages[callIndex++]!);
 }
 
-function createAgent(opts: Partial<Parameters<typeof Agent.prototype["chat"]>[0]> & {
+function createAgent(opts: {
   provider?: Provider;
   planApprovalFn?: (planContent: string) => Promise<PlanApprovalResult>;
   permissionMode?: string;
@@ -108,7 +104,7 @@ describe("enter_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "enter_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "enter_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -135,7 +131,7 @@ describe("enter_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "enter_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "enter_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -169,7 +165,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -194,7 +190,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -223,7 +219,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -258,7 +254,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -290,7 +286,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -324,7 +320,7 @@ describe("exit_plan_mode tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -360,7 +356,7 @@ describe("setPlanApprovalFn", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "exit_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "exit_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -399,7 +395,7 @@ describe("plan mode permission integration", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "enter_plan_mode", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "enter_plan_mode", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });

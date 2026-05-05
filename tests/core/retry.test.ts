@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { isRetryable, withRetry } from "@/core/retry";
+import { mockUsage, mockTextBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // isRetryable
@@ -201,25 +202,6 @@ describe("withRetry agent integration", () => {
     // This verifies that withRetry sits between agent and provider,
     // handling transient errors before the agent's own PTL/recovery logic
     const { Agent } = await import("@/core/agent");
-    const { makeMessage, sequenceProvider } = await (async () => {
-      // Inline helpers matching agent.test.ts patterns
-      function makeMessage(
-        overrides: Partial<import("@/core/types").Message> & { stop_reason: import("@/core/types").Message["stop_reason"] },
-      ): import("@/core/types").Message {
-        return {
-          id: "msg_test",
-          type: "message",
-          role: "assistant",
-          model: "claude-sonnet-4-5-20250514",
-          content: overrides.content ?? [{ type: "text", text: "Hello" }],
-          stop_reason: overrides.stop_reason,
-          stop_sequence: null,
-          usage: { input_tokens: 10, output_tokens: 5 },
-          ...overrides,
-        };
-      }
-      return { makeMessage, sequenceProvider: null };
-    })();
 
     let callCount = 0;
     const retries: string[] = [];
@@ -227,7 +209,7 @@ describe("withRetry agent integration", () => {
       createMessage: async () => {
         callCount++;
         if (callCount === 1) throw { status: 429, message: "rate limited" };
-        return makeMessage({ stop_reason: "end_turn" });
+        return mockMessage({ stop_reason: "end_turn" });
       },
     };
 

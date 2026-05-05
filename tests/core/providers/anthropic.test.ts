@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider, isPromptTooLongError } from "@/core/providers/anthropic";
 import { THINKING_MAX_TOKENS, type Message } from "@/core/types";
 import type { StreamParams } from "@/core/provider";
+import { mockUsage, mockTextBlock, mockToolUseBlock, mockMessage } from "../../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -11,17 +12,12 @@ import type { StreamParams } from "@/core/provider";
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
+  return mockMessage({
     model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
+    content: overrides.content ?? [mockTextBlock("Hello")],
+    usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     ...overrides,
-  };
+  });
 }
 
 interface StreamEvent {
@@ -55,7 +51,7 @@ function fakeStream(
   };
 }
 
-function mockClient(streamFn: (...args: unknown[]) => unknown): Anthropic {
+function mockClient(streamFn: (...args: any[]) => any): Anthropic {
   return {
     messages: { stream: streamFn },
   } as unknown as Anthropic;
@@ -137,7 +133,7 @@ describe("AnthropicProvider thinking block stripping", () => {
       stop_reason: "end_turn",
       content: [
         { type: "thinking", thinking: "internal reasoning" } as any,
-        { type: "text", text: "Final answer" },
+        mockTextBlock("Final answer"),
       ],
     });
     const client = mockClient(() => fakeStream(msg));
@@ -157,8 +153,8 @@ describe("AnthropicProvider thinking block stripping", () => {
       stop_reason: "tool_use",
       content: [
         { type: "thinking", thinking: "internal reasoning" } as any,
-        { type: "text", text: "Let me use a tool" },
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockTextBlock("Let me use a tool"),
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
     const client = mockClient(() => fakeStream(msg));
@@ -197,7 +193,7 @@ describe("AnthropicProvider tool block tracking", () => {
     const msg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
 
@@ -228,8 +224,8 @@ describe("AnthropicProvider tool block tracking", () => {
     const msg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-        { type: "tool_use", id: "tu_2", name: "write_file", input: { path: "b.txt", content: "hi" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "write_file", input: { path: "b.txt", content: "hi" } }),
       ],
     });
 
@@ -260,7 +256,7 @@ describe("AnthropicProvider tool block tracking", () => {
     const msg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
 
@@ -332,9 +328,10 @@ describe("AnthropicProvider tool block tracking", () => {
 describe("isPromptTooLongError", () => {
   test("returns true for Anthropic BadRequestError with prompt too long", () => {
     const err = new Anthropic.BadRequestError(
+      400,
+      undefined,
       "prompt is too long",
-      { status: 400, headers: {} as any, error: undefined, request: {} as any, body: undefined },
-      undefined as any,
+      new Headers(),
     );
     expect(isPromptTooLongError(err)).toBe(true);
   });
@@ -345,9 +342,10 @@ describe("isPromptTooLongError", () => {
 
   test("returns false for other BadRequestErrors", () => {
     const err = new Anthropic.BadRequestError(
+      400,
+      undefined,
       "invalid model",
-      { status: 400, headers: {} as any, error: undefined, request: {} as any, body: undefined },
-      undefined as any,
+      new Headers(),
     );
     expect(isPromptTooLongError(err)).toBe(false);
   });

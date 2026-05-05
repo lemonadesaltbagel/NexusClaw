@@ -37,7 +37,7 @@ export interface ParsedRule {
 
 export function parseRule(rule: string): ParsedRule {
   const match = rule.match(/^([a-z_]+)\((.+)\)$/);
-  if (match) {
+  if (match && match[1] && match[2]) {
     return { tool: match[1], pattern: match[2] };
   }
   return { tool: rule, pattern: null };

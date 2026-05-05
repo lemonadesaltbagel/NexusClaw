@@ -717,12 +717,9 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
     type Batch = { concurrent: boolean; items: CheckedBlock[] };
     const batches: Batch[] = [];
     for (const cb of checked) {
-      if (
-        cb.concurrent &&
-        batches.length > 0 &&
-        batches[batches.length - 1].concurrent
-      ) {
-        batches[batches.length - 1].items.push(cb);
+      const lastBatch = batches[batches.length - 1];
+      if (cb.concurrent && lastBatch && lastBatch.concurrent) {
+        lastBatch.items.push(cb);
       } else {
         batches.push({ concurrent: cb.concurrent, items: [cb] });
       }
@@ -944,7 +941,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
     // Walk in reverse to mark the first KEEP_RECENT_RESULTS per type as kept
     const searchKept = new Set<ResultRef>();
     for (let i = allResults.length - 1; i >= 0; i--) {
-      const r = allResults[i];
+      const r = allResults[i]!;
       if (r.toolName === "read_file" || !SNIPPABLE_TOOLS.has(r.toolName))
         continue;
       const count = searchKeepCount.get(r.toolName) ?? 0;
@@ -1065,7 +1062,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       },
     ];
 
-    if (lastUserMsg.role === "user") {
+    if (lastUserMsg?.role === "user") {
       this.messages.push(lastUserMsg);
     }
 
@@ -1123,7 +1120,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       },
     ];
 
-    if (lastUserMsg.role === "user") {
+    if (lastUserMsg?.role === "user") {
       this.messages.push(lastUserMsg);
     }
 

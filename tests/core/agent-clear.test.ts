@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Agent } from "@/core/agent";
 import type { Provider } from "@/core/provider";
 import type { Message } from "@/core/types";
+import { mockTextBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -10,17 +11,11 @@ import type { Message } from "@/core/types";
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
-    ...overrides,
-  } as Message;
+  const { content, ...rest } = overrides;
+  return mockMessage({
+    content: content ?? [mockTextBlock("Hello")],
+    ...rest,
+  });
 }
 
 function mockProvider(): Provider {
@@ -53,6 +48,6 @@ describe("clearHistory", () => {
 
     const msgs = agent.getMessages();
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]).toEqual({ role: "user", content: "Second" });
+    expect(msgs[0]!).toEqual({ role: "user", content: "Second" });
   });
 });

@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Agent } from "@/core/agent";
 import type { Provider, StreamParams } from "@/core/provider";
 import type { Message } from "@/core/types";
+import { mockUsage, mockTextBlock, mockToolUseBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -10,17 +11,11 @@ import type { Message } from "@/core/types";
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
-    ...overrides,
-  };
+  const { content, ...rest } = overrides;
+  return mockMessage({
+    content: content ?? [mockTextBlock("Hello")],
+    ...rest,
+  });
 }
 
 function mockProvider(
@@ -37,8 +32,8 @@ describe("runOnce", () => {
   test("collects text output and returns with token deltas", async () => {
     const reply = makeMessage({
       stop_reason: "end_turn",
-      content: [{ type: "text", text: "Sub-agent result" }],
-      usage: { input_tokens: 100, output_tokens: 50 },
+      content: [mockTextBlock("Sub-agent result")],
+      usage: mockUsage({ input_tokens: 100, output_tokens: 50 }),
     });
 
     let emittedText = "";
@@ -64,7 +59,7 @@ describe("runOnce", () => {
     const reply = makeMessage({
       stop_reason: "end_turn",
       content: [],
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     });
 
     const provider = mockProvider(() => reply);
@@ -81,8 +76,8 @@ describe("runOnce", () => {
   test("token deltas reflect usage from the run", async () => {
     const reply = makeMessage({
       stop_reason: "end_turn",
-      content: [{ type: "text", text: "ok" }],
-      usage: { input_tokens: 200, output_tokens: 75 },
+      content: [mockTextBlock("ok")],
+      usage: mockUsage({ input_tokens: 200, output_tokens: 75 }),
     });
 
     const provider = mockProvider((params) => {
@@ -137,7 +132,7 @@ describe("emitText routing", () => {
     let received = "";
     const reply = makeMessage({
       stop_reason: "end_turn",
-      content: [{ type: "text", text: "hello world" }],
+      content: [mockTextBlock("hello world")],
     });
 
     const provider = mockProvider((params) => {
@@ -159,7 +154,7 @@ describe("emitText routing", () => {
     let received = "";
     const reply = makeMessage({
       stop_reason: "end_turn",
-      content: [{ type: "text", text: "buffered" }],
+      content: [mockTextBlock("buffered")],
     });
 
     const provider = mockProvider((params) => {
@@ -191,17 +186,12 @@ describe("executeAgentTool (via concurrent dispatch)", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        {
-          type: "tool_use",
-          id: "tu_1",
-          name: "agent",
-          input: { type: "explore", description: "find file", prompt: "search" },
-        },
+        mockToolUseBlock({ id: "tu_1", name: "agent", input: { type: "explore", description: "find file", prompt: "search" } }),
       ],
     });
     const subAgentReply = makeMessage({
       stop_reason: "end_turn",
-      content: [{ type: "text", text: "Found it" }],
+      content: [mockTextBlock("Found it")],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
 
@@ -231,12 +221,7 @@ describe("executeAgentTool (via concurrent dispatch)", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        {
-          type: "tool_use",
-          id: "tu_1",
-          name: "agent",
-          input: { type: "explore", description: "fail", prompt: "do" },
-        },
+        mockToolUseBlock({ id: "tu_1", name: "agent", input: { type: "explore", description: "fail", prompt: "do" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });

@@ -10,6 +10,7 @@ import {
   MAX_COMPACT_RETRIES,
   type Message,
 } from "@/core/types";
+import { mockUsage, mockTextBlock, mockToolUseBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers — mock Provider with controllable responses
@@ -19,17 +20,13 @@ import {
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
-    ...overrides,
-  };
+  const { stop_reason, ...rest } = overrides;
+  return mockMessage({
+    content: overrides.content ?? [mockTextBlock("Hello")],
+    stop_reason,
+    usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
+    ...rest,
+  });
 }
 
 /**
@@ -56,7 +53,7 @@ function sequenceProvider(
   return {
     createMessage: async (params) => {
       captured?.params.push(params);
-      const msg = messages[callIndex] ?? messages[messages.length - 1];
+      const msg = messages[callIndex] ?? messages[messages.length - 1]!;
       callIndex++;
       return msg;
     },
@@ -100,9 +97,9 @@ describe("tool use", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "text", text: "Using tool" },
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-        { type: "tool_use", id: "tu_2", name: "read_file", input: { path: "b.txt" } },
+        mockTextBlock("Using tool"),
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "read_file", input: { path: "b.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -128,7 +125,7 @@ describe("tool use", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "bad_tool", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "bad_tool", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -158,7 +155,7 @@ describe("tool use", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "unknown_tool", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "unknown_tool", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -192,8 +189,8 @@ describe("max_tokens recovery", () => {
     const agent = new Agent({ provider });
     await agent.chat("Write essay");
 
-    expect(captured.params[0].maxTokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(captured.params[1].maxTokens).toBe(ESCALATED_MAX_TOKENS);
+    expect(captured.params[0]!.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(captured.params[1]!.maxTokens).toBe(ESCALATED_MAX_TOKENS);
   });
 
   test("after escalation, uses recovery retries up to MAX_RECOVERY_RETRIES then returns", async () => {
@@ -240,9 +237,10 @@ describe("pause_turn", () => {
 describe("prompt too long recovery", () => {
   test("first PTL error triggers collapseContext", async () => {
     const ptlError = new Anthropic.BadRequestError(
+      400,
+      undefined,
       "prompt is too long",
-      { status: 400, headers: {} as any, error: undefined, request: {} as any, body: undefined },
-      undefined as any,
+      new Headers(),
     );
 
     let callCount = 0;
@@ -269,9 +267,10 @@ describe("prompt too long recovery", () => {
 
   test("after collapse, PTL triggers compactMessages", async () => {
     const ptlError = new Anthropic.BadRequestError(
+      400,
+      undefined,
       "prompt is too long",
-      { status: 400, headers: {} as any, error: undefined, request: {} as any, body: undefined },
-      undefined as any,
+      new Headers(),
     );
 
     let callCount = 0;
@@ -298,9 +297,10 @@ describe("prompt too long recovery", () => {
 
   test("exhausting all PTL retries throws the withheld error", async () => {
     const ptlError = new Anthropic.BadRequestError(
+      400,
+      undefined,
       "prompt is too long",
-      { status: 400, headers: {} as any, error: undefined, request: {} as any, body: undefined },
-      undefined as any,
+      new Headers(),
     );
 
     const provider: Provider = {
@@ -430,8 +430,8 @@ describe("abort controller", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "tool_a", input: {} },
-        { type: "tool_use", id: "tu_2", name: "tool_b", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "tool_a", input: {} }),
+        mockToolUseBlock({ id: "tu_2", name: "tool_b", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });

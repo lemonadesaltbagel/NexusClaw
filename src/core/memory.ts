@@ -97,16 +97,17 @@ export function parseFrontmatter(content: string): FrontmatterResult {
 
   let endIdx = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === "---") { endIdx = i; break; }
+    if (lines[i]!.trim() === "---") { endIdx = i; break; }
   }
   if (endIdx === -1) return { meta: {}, body: content };
 
   const meta: Record<string, string> = {};
   for (let i = 1; i < endIdx; i++) {
-    const colonIdx = lines[i].indexOf(":");
+    const line = lines[i]!;
+    const colonIdx = line.indexOf(":");
     if (colonIdx === -1) continue;
-    const key = lines[i].slice(0, colonIdx).trim();
-    const value = lines[i].slice(colonIdx + 1).trim();
+    const key = line.slice(0, colonIdx).trim();
+    const value = line.slice(colonIdx + 1).trim();
     if (key) meta[key] = value;
   }
 

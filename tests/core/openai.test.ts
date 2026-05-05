@@ -54,8 +54,8 @@ describe("toOpenAITools", () => {
 
     const result = toOpenAITools(tools);
     expect(result).toHaveLength(2);
-    expect(result[0].function.name).toBe("tool_a");
-    expect(result[1].function.name).toBe("tool_b");
+    expect((result[0] as any).function.name).toBe("tool_a");
+    expect((result[1] as any).function.name).toBe("tool_b");
   });
 
   test("returns empty array for empty input", () => {

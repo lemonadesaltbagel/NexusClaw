@@ -5,6 +5,7 @@ import type { Message } from "@/core/types";
 import { existsSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { mockUsage, mockTextBlock, mockToolUseBlock } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -18,12 +19,11 @@ function makeMessage(
     type: "message",
     role: "assistant",
     model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
+    content: [mockTextBlock("Hello")],
     stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
+    usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     ...overrides,
-  };
+  } as Message;
 }
 
 function sequenceProvider(
@@ -36,7 +36,7 @@ function sequenceProvider(
       captured?.params.push(params);
       const msg = messages[callIndex] ?? messages[messages.length - 1];
       callIndex++;
-      return msg;
+      return msg!;
     },
   };
 }
@@ -55,7 +55,7 @@ function makeToolRound(
     {
       role: "assistant",
       content: [
-        { type: "tool_use", id: toolUseId, name: toolName, input },
+        mockToolUseBlock({ id: toolUseId, name: toolName, input }),
       ],
     },
     {
@@ -95,7 +95,7 @@ describe("persistLargeResult", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -119,7 +119,7 @@ describe("persistLargeResult", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "grep_search", input: {} },
+        mockToolUseBlock({ id: "tu_1", name: "grep_search", input: {} }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -160,18 +160,18 @@ describe("budgetToolResults", () => {
 
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
-      usage: { input_tokens: 80_000, output_tokens: 5 }, // 40% of 200K
+      usage: mockUsage({ input_tokens: 80_000, output_tokens: 5 }), // 40% of 200K
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "a.ts" } }),
       ],
     });
     const endMsg1 = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 80_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 80_000, output_tokens: 5 }),
     });
     const endMsg2 = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 80_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 80_000, output_tokens: 5 }),
     });
     const provider = sequenceProvider([toolMsg, endMsg1, endMsg2]);
 
@@ -201,18 +201,18 @@ describe("budgetToolResults", () => {
 
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
-      usage: { input_tokens: 160_000, output_tokens: 5 }, // 80% of 200K
+      usage: mockUsage({ input_tokens: 160_000, output_tokens: 5 }), // 80% of 200K
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "a.ts" } }),
       ],
     });
     const endMsg1 = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 160_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 160_000, output_tokens: 5 }),
     });
     const endMsg2 = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 160_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 160_000, output_tokens: 5 }),
     });
     const provider = sequenceProvider([toolMsg, endMsg1, endMsg2]);
 
@@ -258,20 +258,20 @@ describe("snipStaleResults", () => {
     const toolMsgs = tools.map((t) =>
       makeMessage({
         stop_reason: "tool_use" as const,
-        usage: { input_tokens: 130_000, output_tokens: 5 }, // 65%
-        content: [{ type: "tool_use", ...t }],
+        usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }), // 65%
+        content: [mockToolUseBlock(t)],
       }),
     );
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 130_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }),
     });
 
     let callCount = 0;
     const provider: Provider = {
       createMessage: async () => {
         callCount++;
-        if (callCount <= 5) return toolMsgs[callCount - 1];
+        if (callCount <= 5) return toolMsgs[callCount - 1]!;
         return endMsg;
       },
     };
@@ -312,14 +312,9 @@ describe("snipStaleResults", () => {
       toolMessages.push(
         makeMessage({
           stop_reason: "tool_use",
-          usage: { input_tokens: 130_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }),
           content: [
-            {
-              type: "tool_use",
-              id: `tu_${i}`,
-              name: "grep_search",
-              input: { pattern: `search_${i}` },
-            },
+            mockToolUseBlock({ id: `tu_${i}`, name: "grep_search", input: { pattern: `search_${i}` } }),
           ],
         }),
       );
@@ -328,13 +323,13 @@ describe("snipStaleResults", () => {
     let callCount = 0;
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 130_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }),
     });
 
     const provider: Provider = {
       createMessage: async () => {
         callCount++;
-        if (callCount <= 5) return toolMessages[callCount - 1];
+        if (callCount <= 5) return toolMessages[callCount - 1]!;
         return endMsg;
       },
     };
@@ -374,28 +369,23 @@ describe("snipStaleResults", () => {
       toolMessages.push(
         makeMessage({
           stop_reason: "tool_use",
-          usage: { input_tokens: 130_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }),
           content: [
-            {
-              type: "tool_use",
-              id: `tu_${i}`,
-              name: "read_file",
-              input: { file_path: `/src/file${i}.ts` },
-            },
+            mockToolUseBlock({ id: `tu_${i}`, name: "read_file", input: { file_path: `/src/file${i}.ts` } }),
           ],
         }),
       );
     }
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 130_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 130_000, output_tokens: 5 }),
     });
 
     let callCount = 0;
     const provider: Provider = {
       createMessage: async () => {
         callCount++;
-        if (callCount <= 4) return toolMessages[callCount - 1];
+        if (callCount <= 4) return toolMessages[callCount - 1]!;
         return endMsg;
       },
     };
@@ -432,21 +422,21 @@ describe("snipStaleResults", () => {
     // Two reads of same file at low utilization — should NOT be snipped
     const readTool1 = makeMessage({
       stop_reason: "tool_use",
-      usage: { input_tokens: 100_000, output_tokens: 5 }, // 50%
+      usage: mockUsage({ input_tokens: 100_000, output_tokens: 5 }), // 50%
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "/a.ts" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "/a.ts" } }),
       ],
     });
     const readTool2 = makeMessage({
       stop_reason: "tool_use",
-      usage: { input_tokens: 100_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 100_000, output_tokens: 5 }),
       content: [
-        { type: "tool_use", id: "tu_2", name: "read_file", input: { file_path: "/a.ts" } },
+        mockToolUseBlock({ id: "tu_2", name: "read_file", input: { file_path: "/a.ts" } }),
       ],
     });
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 100_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 100_000, output_tokens: 5 }),
     });
 
     let callCount = 0;
@@ -495,23 +485,23 @@ describe("microcompact", () => {
       toolMessages.push(
         makeMessage({
           stop_reason: "tool_use",
-          usage: { input_tokens: 10, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
           content: [
-            { type: "tool_use", id: `tu_${i}`, name: "read_file", input: { file_path: `f${i}.ts` } },
+            mockToolUseBlock({ id: `tu_${i}`, name: "read_file", input: { file_path: `f${i}.ts` } }),
           ],
         }),
       );
     }
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     });
 
     let callCount = 0;
     const provider: Provider = {
       createMessage: async () => {
         callCount++;
-        if (callCount <= 5) return toolMessages[callCount - 1];
+        if (callCount <= 5) return toolMessages[callCount - 1]!;
         return endMsg;
       },
     };
@@ -558,14 +548,14 @@ describe("microcompact", () => {
   test("does not clear results when not idle", async () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "a.ts" } }),
       ],
     });
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 10, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
     });
 
     let callCount = 0;
@@ -618,9 +608,9 @@ describe("auto-compact", () => {
           // Chat 1: tool_use
           return makeMessage({
             stop_reason: "tool_use",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
             content: [
-              { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+              mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "a.ts" } }),
             ],
           });
         }
@@ -628,14 +618,14 @@ describe("auto-compact", () => {
           // Chat 1: end_turn after tool
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 3) {
           // Chat 2: end_turn with high utilization → triggers compact
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 180_000, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 180_000, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 4) {
@@ -643,13 +633,13 @@ describe("auto-compact", () => {
           summaryCallMessages = params.messages;
           return makeMessage({
             stop_reason: "end_turn",
-            content: [{ type: "text", text: "Summary: we read a.ts." }],
-            usage: { input_tokens: 1_000, output_tokens: 50 },
+            content: [mockTextBlock("Summary: we read a.ts.")],
+            usage: mockUsage({ input_tokens: 1_000, output_tokens: 50 }),
           });
         }
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 5_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 5_000, output_tokens: 5 }),
         });
       },
     };
@@ -684,7 +674,7 @@ describe("auto-compact", () => {
   test("does not compact when utilization is below 85%", async () => {
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 100_000, output_tokens: 5 }, // 50%
+      usage: mockUsage({ input_tokens: 100_000, output_tokens: 5 }), // 50%
     });
     const provider = sequenceProvider([endMsg, endMsg]);
 
@@ -719,9 +709,9 @@ describe("auto-compact", () => {
           // Chat 1: tool_use (low util)
           return makeMessage({
             stop_reason: "tool_use",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
             content: [
-              { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+              mockToolUseBlock({ id: "tu_1", name: "read_file", input: {} }),
             ],
           });
         }
@@ -729,28 +719,28 @@ describe("auto-compact", () => {
           // Chat 1: end_turn (low util)
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 3) {
           // Chat 2: end_turn (high util → triggers compact)
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 180_000, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 180_000, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 4) {
           // Summary call
           return makeMessage({
             stop_reason: "end_turn",
-            content: [{ type: "text", text: "Summary." }],
-            usage: { input_tokens: 500, output_tokens: 20 },
+            content: [mockTextBlock("Summary.")],
+            usage: mockUsage({ input_tokens: 500, output_tokens: 20 }),
           });
         }
         // Chat 3: should NOT trigger compaction (lastInputTokenCount was reset)
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 5_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 5_000, output_tokens: 5 }),
         });
       },
     };
@@ -776,7 +766,7 @@ describe("auto-compact", () => {
         providerCallCount++;
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 180_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 180_000, output_tokens: 5 }),
         });
       },
     };
@@ -810,23 +800,23 @@ describe("auto-compact", () => {
         if (providerCallCount === 1) {
           return makeMessage({
             stop_reason: "tool_use",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
             content: [
-              { type: "tool_use", id: "tu_1", name: "read_file", input: { file_path: "a.ts" } },
+              mockToolUseBlock({ id: "tu_1", name: "read_file", input: { file_path: "a.ts" } }),
             ],
           });
         }
         if (providerCallCount === 2) {
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 3) {
           // Chat 2: high util triggers compaction
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 180_000, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 180_000, output_tokens: 5 }),
           });
         }
         if (providerCallCount === 4) {
@@ -834,13 +824,13 @@ describe("auto-compact", () => {
           summaryCallSystem = params.system;
           return makeMessage({
             stop_reason: "end_turn",
-            content: [{ type: "text", text: "Summary: read a.ts." }],
-            usage: { input_tokens: 1_000, output_tokens: 50 },
+            content: [mockTextBlock("Summary: read a.ts.")],
+            usage: mockUsage({ input_tokens: 1_000, output_tokens: 50 }),
           });
         }
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 5_000, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 5_000, output_tokens: 5 }),
         });
       },
     };
@@ -891,23 +881,23 @@ describe("manual compact", () => {
         if (providerCallCount === 1) {
           return makeMessage({
             stop_reason: "tool_use",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
             content: [
-              { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+              mockToolUseBlock({ id: "tu_1", name: "read_file", input: {} }),
             ],
           });
         }
         if (providerCallCount === 2) {
           return makeMessage({
             stop_reason: "end_turn",
-            usage: { input_tokens: 10, output_tokens: 5 },
+            usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
           });
         }
         // Summary call from compact()
         return makeMessage({
           stop_reason: "end_turn",
-          content: [{ type: "text", text: "Summary of work so far." }],
-          usage: { input_tokens: 500, output_tokens: 30 },
+          content: [mockTextBlock("Summary of work so far.")],
+          usage: mockUsage({ input_tokens: 500, output_tokens: 30 }),
         });
       },
     };
@@ -959,7 +949,7 @@ describe("manual compact", () => {
         providerCallCount++;
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 10, output_tokens: 5 },
+          usage: mockUsage({ input_tokens: 10, output_tokens: 5 }),
         });
       },
     };
@@ -988,7 +978,7 @@ describe("token tracking", () => {
         callCount++;
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 1000 * callCount, output_tokens: 100 * callCount },
+          usage: mockUsage({ input_tokens: 1000 * callCount, output_tokens: 100 * callCount }),
         });
       },
     };
@@ -1022,15 +1012,15 @@ describe("token tracking", () => {
         if (callCount === 1) {
           return makeMessage({
             stop_reason: "tool_use",
-            usage: { input_tokens: 500, output_tokens: 50 },
+            usage: mockUsage({ input_tokens: 500, output_tokens: 50 }),
             content: [
-              { type: "tool_use", id: "tu_1", name: "read_file", input: {} },
+              mockToolUseBlock({ id: "tu_1", name: "read_file", input: {} }),
             ],
           });
         }
         return makeMessage({
           stop_reason: "end_turn",
-          usage: { input_tokens: 800, output_tokens: 80 },
+          usage: mockUsage({ input_tokens: 800, output_tokens: 80 }),
         });
       },
     };
@@ -1082,20 +1072,20 @@ describe("compression pipeline ordering", () => {
     const toolMsgs = tools.map((t) =>
       makeMessage({
         stop_reason: "tool_use" as const,
-        usage: { input_tokens: 160_000, output_tokens: 5 }, // 80%
-        content: [{ type: "tool_use", ...t }],
+        usage: mockUsage({ input_tokens: 160_000, output_tokens: 5 }), // 80%
+        content: [mockToolUseBlock(t)],
       }),
     );
     const endMsg = makeMessage({
       stop_reason: "end_turn",
-      usage: { input_tokens: 160_000, output_tokens: 5 },
+      usage: mockUsage({ input_tokens: 160_000, output_tokens: 5 }),
     });
 
     let callCount = 0;
     const provider: Provider = {
       createMessage: async () => {
         callCount++;
-        if (callCount <= 5) return toolMsgs[callCount - 1];
+        if (callCount <= 5) return toolMsgs[callCount - 1]!;
         return endMsg;
       },
     };

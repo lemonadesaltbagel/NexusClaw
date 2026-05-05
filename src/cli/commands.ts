@@ -99,7 +99,7 @@ export const chatCommand = new Command("chat")
     if (mcpManager.toolCount > 0) {
       setMcpManager(mcpManager);
       for (const t of mcpManager.getToolDefinitions()) {
-        tools.push(t as Anthropic.Messages.Tool);
+        tools.push(t as Omit<import("@/tools/definitions").ToolDef, "deferred">);
       }
     }
 

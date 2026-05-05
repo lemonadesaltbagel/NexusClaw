@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import type OpenAI from "openai";
 import { Agent } from "@/core/agent";
 import { OpenAIProvider } from "@/core/providers/openai";
+import { mockTextBlock } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers — mock OpenAI client with controllable streaming responses
@@ -31,7 +32,7 @@ function mockOpenAIClient(chunkSets: MockChunk[][]): OpenAI {
     chat: {
       completions: {
         create: async () => {
-          const chunks = chunkSets[callIndex] ?? chunkSets[chunkSets.length - 1];
+          const chunks = chunkSets[callIndex] ?? chunkSets[chunkSets.length - 1]!;
           callIndex++;
           return {
             [Symbol.asyncIterator]() {
@@ -62,7 +63,7 @@ function textChunks(text: string): MockChunk[] {
 function toolCallChunks(toolCalls: Array<{ id: string; name: string; arguments: string }>): MockChunk[] {
   const chunks: MockChunk[] = [];
   for (let i = 0; i < toolCalls.length; i++) {
-    const tc = toolCalls[i];
+    const tc = toolCalls[i]!;
     chunks.push({
       choices: [{ delta: { tool_calls: [{ index: i, id: tc.id, function: { name: tc.name, arguments: "" } }] }, finish_reason: null }],
       usage: undefined,
@@ -100,7 +101,7 @@ describe("OpenAI provider - text completion", () => {
     await agent.chat("Hi");
     const msgs = agent.getMessages();
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]).toEqual({ role: "user", content: "Hi" });
+    expect(msgs[0]!).toEqual({ role: "user", content: "Hi" });
   });
 
   test("onText receives streamed text deltas", async () => {
@@ -125,7 +126,7 @@ describe("OpenAI provider - text completion", () => {
 
     const result = await agent.chat("Test");
     expect(result.response.stop_reason).toBe("end_turn");
-    expect(result.response.content).toEqual([{ type: "text", text: "Response text" }]);
+    expect(result.response.content).toEqual([{ type: "text", text: "Response text" } as any]);
     expect(result.response.usage.input_tokens).toBe(10);
     expect(result.response.usage.output_tokens).toBe(5);
   });
@@ -153,8 +154,8 @@ describe("OpenAI provider - tool calls", () => {
     const result = await agent.chat("Read a.txt");
 
     expect(executed).toHaveLength(1);
-    expect(executed[0].name).toBe("read_file");
-    expect(executed[0].input).toEqual({ file_path: "a.txt" });
+    expect(executed[0]!.name).toBe("read_file");
+    expect(executed[0]!.input).toEqual({ file_path: "a.txt" });
     expect(result.response.stop_reason).toBe("end_turn");
   });
 
@@ -301,14 +302,14 @@ describe("OpenAI provider - message history", () => {
     const msgs = agent.getMessages();
 
     // user → assistant (tool_use) → user (tool_result) → ...
-    expect(msgs[0]).toEqual({ role: "user", content: "Read a.txt" });
-    expect(msgs[1].role).toBe("assistant");
-    const assistantContent = msgs[1].content as any[];
+    expect(msgs[0]!).toEqual({ role: "user", content: "Read a.txt" });
+    expect(msgs[1]!.role).toBe("assistant");
+    const assistantContent = msgs[1]!.content as any[];
     expect(assistantContent.some((b: any) => b.type === "tool_use" && b.name === "read_file")).toBe(true);
-    expect(msgs[2].role).toBe("user");
-    const toolResults = msgs[2].content as any[];
-    expect(toolResults[0].type).toBe("tool_result");
-    expect(toolResults[0].tool_use_id).toBe("call_1");
-    expect(toolResults[0].content).toBe("file data");
+    expect(msgs[2]!.role).toBe("user");
+    const toolResults = msgs[2]!.content as any[];
+    expect(toolResults[0]!.type).toBe("tool_result");
+    expect(toolResults[0]!.tool_use_id).toBe("call_1");
+    expect(toolResults[0]!.content).toBe("file data");
   });
 });

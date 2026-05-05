@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Agent } from "@/core/agent";
 import type { Provider, StreamParams } from "@/core/provider";
 import type { Message } from "@/core/types";
+import { mockUsage, mockTextBlock, mockToolUseBlock, mockMessage } from "../_helpers";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -10,17 +11,11 @@ import type { Message } from "@/core/types";
 function makeMessage(
   overrides: Partial<Message> & { stop_reason: Message["stop_reason"] },
 ): Message {
-  return {
-    id: "msg_test",
-    type: "message",
-    role: "assistant",
-    model: "claude-sonnet-4-5-20250514",
-    content: overrides.content ?? [{ type: "text", text: "Hello" }],
-    stop_reason: overrides.stop_reason,
-    stop_sequence: null,
-    usage: { input_tokens: 10, output_tokens: 5 },
-    ...overrides,
-  } as Message;
+  const { content, ...rest } = overrides;
+  return mockMessage({
+    content: content ?? [mockTextBlock("Hello")],
+    ...rest,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +27,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -69,14 +64,14 @@ describe("streaming tool execution", () => {
 
     expect(result.response.stop_reason).toBe("end_turn");
     expect(executionTimestamps).toHaveLength(1);
-    expect(executionTimestamps[0].name).toBe("read_file");
+    expect(executionTimestamps[0]!.name).toBe("read_file");
   });
 
   test("early execution result is used instead of re-executing", async () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -116,7 +111,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "write_file", input: { path: "a.txt", content: "x" } },
+        mockToolUseBlock({ id: "tu_1", name: "write_file", input: { path: "a.txt", content: "x" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -157,7 +152,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "/etc/passwd" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "/etc/passwd" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -204,7 +199,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "secret.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "secret.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -245,9 +240,9 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-        { type: "tool_use", id: "tu_2", name: "write_file", input: { path: "b.txt", content: "x" } },
-        { type: "tool_use", id: "tu_3", name: "grep_search", input: { pattern: "foo" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "write_file", input: { path: "b.txt", content: "x" } }),
+        mockToolUseBlock({ id: "tu_3", name: "grep_search", input: { pattern: "foo" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -291,7 +286,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "missing.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "missing.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -337,7 +332,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -380,7 +375,7 @@ describe("streaming tool execution", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "safe.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "safe.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -432,9 +427,9 @@ describe("parallel tool execution batching", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-        { type: "tool_use", id: "tu_2", name: "read_file", input: { path: "b.txt" } },
-        { type: "tool_use", id: "tu_3", name: "read_file", input: { path: "c.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "read_file", input: { path: "b.txt" } }),
+        mockToolUseBlock({ id: "tu_3", name: "read_file", input: { path: "c.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -478,8 +473,8 @@ describe("parallel tool execution batching", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "write_file", input: { path: "a.txt", content: "x" } },
-        { type: "tool_use", id: "tu_2", name: "write_file", input: { path: "b.txt", content: "y" } },
+        mockToolUseBlock({ id: "tu_1", name: "write_file", input: { path: "a.txt", content: "x" } }),
+        mockToolUseBlock({ id: "tu_2", name: "write_file", input: { path: "b.txt", content: "y" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -506,7 +501,7 @@ describe("parallel tool execution batching", () => {
 
     expect(timestamps).toHaveLength(2);
     // Second tool should start after first finishes (sequential)
-    expect(timestamps[1].start).toBeGreaterThanOrEqual(timestamps[0].end);
+    expect(timestamps[1]!.start).toBeGreaterThanOrEqual(timestamps[0]!.end);
   });
 
   test("mixed tools: safe batch runs parallel, non-safe runs sequentially", async () => {
@@ -515,11 +510,11 @@ describe("parallel tool execution batching", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "a.txt" } },
-        { type: "tool_use", id: "tu_2", name: "grep_search", input: { pattern: "foo" } },
-        { type: "tool_use", id: "tu_3", name: "write_file", input: { path: "b.txt", content: "x" } },
-        { type: "tool_use", id: "tu_4", name: "read_file", input: { path: "c.txt" } },
-        { type: "tool_use", id: "tu_5", name: "grep_search", input: { pattern: "bar" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "a.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "grep_search", input: { pattern: "foo" } }),
+        mockToolUseBlock({ id: "tu_3", name: "write_file", input: { path: "b.txt", content: "x" } }),
+        mockToolUseBlock({ id: "tu_4", name: "read_file", input: { path: "c.txt" } }),
+        mockToolUseBlock({ id: "tu_5", name: "grep_search", input: { pattern: "bar" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -565,9 +560,9 @@ describe("parallel tool execution batching", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "ok.txt" } },
-        { type: "tool_use", id: "tu_2", name: "read_file", input: { path: "secret.txt" } },
-        { type: "tool_use", id: "tu_3", name: "read_file", input: { path: "also-ok.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "ok.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "read_file", input: { path: "secret.txt" } }),
+        mockToolUseBlock({ id: "tu_3", name: "read_file", input: { path: "also-ok.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -604,9 +599,9 @@ describe("parallel tool execution batching", () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "good.txt" } },
-        { type: "tool_use", id: "tu_2", name: "read_file", input: { path: "bad.txt" } },
-        { type: "tool_use", id: "tu_3", name: "read_file", input: { path: "also-good.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "good.txt" } }),
+        mockToolUseBlock({ id: "tu_2", name: "read_file", input: { path: "bad.txt" } }),
+        mockToolUseBlock({ id: "tu_3", name: "read_file", input: { path: "also-good.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -636,16 +631,16 @@ describe("parallel tool execution batching", () => {
     );
 
     expect(toolResults).toHaveLength(3);
-    expect(toolResults[0].content).toBe("content of good.txt");
-    expect(toolResults[1].content).toContain("disk error");
-    expect(toolResults[2].content).toBe("content of also-good.txt");
+    expect(toolResults[0]!.content).toBe("content of good.txt");
+    expect(toolResults[1]!.content).toContain("disk error");
+    expect(toolResults[2]!.content).toBe("content of also-good.txt");
   });
 
   test("single tool creates a single-item batch and works correctly", async () => {
     const toolMsg = makeMessage({
       stop_reason: "tool_use",
       content: [
-        { type: "tool_use", id: "tu_1", name: "read_file", input: { path: "only.txt" } },
+        mockToolUseBlock({ id: "tu_1", name: "read_file", input: { path: "only.txt" } }),
       ],
     });
     const endMsg = makeMessage({ stop_reason: "end_turn" });
@@ -670,6 +665,6 @@ describe("parallel tool execution batching", () => {
       (b: any) => b.type === "tool_result",
     );
     expect(toolResults).toHaveLength(1);
-    expect(toolResults[0].content).toBe("single result");
+    expect(toolResults[0]!.content).toBe("single result");
   });
 });
