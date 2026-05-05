@@ -95,24 +95,18 @@ export const chatCommand = new Command("chat")
 
     // --- Initialize MCP servers ---
     const mcpManager = new McpManager();
-    const mcpConfigs = McpManager.loadConfigs();
-    if (Object.keys(mcpConfigs).length > 0) {
-      await mcpManager.connectAll(mcpConfigs);
+    await mcpManager.loadAndConnect();
+    if (mcpManager.toolCount > 0) {
       setMcpManager(mcpManager);
-
-      // Add MCP tools to the tool list with full schemas
-      if (mcpManager.toolCount > 0) {
-        const mcpTools = await mcpManager.discoverTools();
-        for (const t of mcpTools) {
-          tools.push(t as Anthropic.Messages.Tool);
-        }
+      for (const t of mcpManager.getToolDefinitions()) {
+        tools.push(t as Anthropic.Messages.Tool);
       }
     }
 
     // Clean up MCP connections on exit
-    process.on("exit", () => { mcpManager.disconnectAll(); });
-    process.on("SIGINT", () => { mcpManager.disconnectAll(); });
-    process.on("SIGTERM", () => { mcpManager.disconnectAll(); });
+    process.on("exit", () => { mcpManager.closeAll(); });
+    process.on("SIGINT", () => { mcpManager.closeAll(); });
+    process.on("SIGTERM", () => { mcpManager.closeAll(); });
 
     // --- Create agent ---
     // Don't pass "plan" directly — togglePlanMode() handles plan mode entry

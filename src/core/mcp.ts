@@ -19,7 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,13 +126,10 @@ export class McpConnection {
         // Ignore non-JSON lines (server logs, etc.)
       }
     });
-
-    // Run the MCP initialization handshake
-    await this.initialize();
   }
 
-  /** Disconnect from the MCP server. */
-  async disconnect(): Promise<void> {
+  /** Tear down the connection — kill process, reject pending requests. */
+  close(): void {
     this.rl?.close();
     this.rl = null;
 
@@ -198,106 +195,143 @@ export class McpConnection {
 
 export class McpManager {
   private connections = new Map<string, McpConnection>();
+  private tools: McpToolInfo[] = [];
+  private connected = false;
   /** Maps prefixed tool name ("mcp__server__tool") → { connection, originalName } */
   private toolMap = new Map<
     string,
     { connection: McpConnection; originalName: string }
   >();
 
-  /** Load MCP server configs from user + project settings. */
-  static loadConfigs(): Record<string, McpServerConfig> {
-    const configs: Record<string, McpServerConfig> = {};
+  // -----------------------------------------------------------------------
+  // Configuration Loading
+  // -----------------------------------------------------------------------
 
-    const paths = [
-      join(homedir(), ".claude", "settings.json"),
-      join(process.cwd(), ".claude", "settings.json"),
-    ];
+  /** Load and merge MCP server configs from all config sources. */
+  private loadConfigs(): Record<string, McpServerConfig> {
+    const merged: Record<string, McpServerConfig> = {};
 
-    for (const path of paths) {
+    // 1. User-level: ~/.claude/settings.json
+    const globalPath = join(homedir(), ".claude", "settings.json");
+    this.mergeConfigFile(globalPath, merged);
+
+    // 2. Project-level: .claude/settings.json
+    const projectPath = join(process.cwd(), ".claude", "settings.json");
+    this.mergeConfigFile(projectPath, merged);
+
+    // 3. MCP-specific: .mcp.json
+    const mcpJsonPath = join(process.cwd(), ".mcp.json");
+    this.mergeConfigFile(mcpJsonPath, merged);
+
+    return merged;
+  }
+
+  /** Merge MCP server entries from a single config file into the target. */
+  private mergeConfigFile(
+    filePath: string,
+    target: Record<string, McpServerConfig>,
+  ): void {
+    if (!existsSync(filePath)) return;
+    try {
+      const raw = JSON.parse(readFileSync(filePath, "utf-8"));
+      const servers = raw.mcpServers || raw; // .mcp.json may be a flat server mapping
+      for (const [name, config] of Object.entries(servers)) {
+        if (this.isValidConfig(config)) {
+          target[name] = config as McpServerConfig;
+        }
+      }
+    } catch {
+      // Silently skip malformed config files
+    }
+  }
+
+  /** Validate that a config object has the required shape. */
+  private isValidConfig(config: unknown): config is McpServerConfig {
+    if (!config || typeof config !== "object") return false;
+    const c = config as Record<string, unknown>;
+    return typeof c.command === "string";
+  }
+
+  // -----------------------------------------------------------------------
+  // Connection and Discovery
+  // -----------------------------------------------------------------------
+
+  private static readonly TIMEOUT_MS = 15_000;
+
+  /** Load configs, connect to all servers, and discover tools. Idempotent. */
+  async loadAndConnect(): Promise<void> {
+    if (this.connected) return;
+    this.connected = true;
+
+    const configs = this.loadConfigs();
+    if (Object.keys(configs).length === 0) return;
+
+    for (const [name, config] of Object.entries(configs)) {
+      const conn = new McpConnection(name, config);
       try {
-        const text = readFileSync(path, "utf-8");
-        const settings = JSON.parse(text);
-        if (settings?.mcpServers && typeof settings.mcpServers === "object") {
-          Object.assign(configs, settings.mcpServers);
+        await conn.connect();
+
+        // Handshake with timeout
+        await Promise.race([
+          conn.initialize(),
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error("timeout")), McpManager.TIMEOUT_MS),
+          ),
+        ]);
+
+        // Tool discovery with timeout
+        const serverTools = await Promise.race([
+          conn.listTools(),
+          new Promise<McpToolInfo[]>((_, rej) =>
+            setTimeout(() => rej(new Error("timeout")), McpManager.TIMEOUT_MS),
+          ),
+        ]);
+
+        this.connections.set(name, conn);
+        this.tools.push(...serverTools);
+
+        // Build the prefixed tool map for dispatch
+        for (const tool of serverTools) {
+          const prefixedName = `mcp__${name}__${tool.name}`;
+          this.toolMap.set(prefixedName, {
+            connection: conn,
+            originalName: tool.name,
+          });
         }
-      } catch {
-        // File doesn't exist or isn't valid JSON — skip
+
+        console.error(
+          `[mcp] Connected to '${name}' — ${serverTools.length} tools`,
+        );
+      } catch (err: any) {
+        console.error(
+          `[mcp] Failed to connect to '${name}': ${err.message}`,
+        );
+        conn.close();
       }
     }
-
-    return configs;
   }
 
-  /** Connect to all configured MCP servers and discover their tools. */
-  async connectAll(
-    configs?: Record<string, McpServerConfig>,
-  ): Promise<void> {
-    const serverConfigs = configs ?? McpManager.loadConfigs();
-    if (Object.keys(serverConfigs).length === 0) return;
-
-    const results = await Promise.allSettled(
-      Object.entries(serverConfigs).map(async ([name, config]) => {
-        const conn = new McpConnection(name, config);
-        try {
-          await conn.connect();
-          this.connections.set(name, conn);
-
-          // Discover tools
-          const tools = await conn.listTools();
-          for (const tool of tools) {
-            const prefixedName = `mcp__${name}__${tool.name}`;
-            this.toolMap.set(prefixedName, {
-              connection: conn,
-              originalName: tool.name,
-            });
-          }
-
-          console.error(
-            `  ✓ MCP server "${name}" connected (${tools.length} tools)`,
-          );
-        } catch (err) {
-          console.error(
-            `  ✗ MCP server "${name}" failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          await conn.disconnect().catch(() => {});
-        }
-      }),
-    );
-  }
-
-  /** Discover tools from all connected servers and return agent-compatible definitions. */
-  async discoverTools(): Promise<
-    Array<{
-      name: string;
-      description: string;
-      input_schema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
-    }>
-  > {
-    const defs: Array<{
-      name: string;
-      description: string;
-      input_schema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
-    }> = [];
-
-    for (const [, conn] of this.connections) {
-      const tools = await conn.listTools();
-      for (const tool of tools) {
-        const prefixedName = `mcp__${conn.name}__${tool.name}`;
-        defs.push({
-          name: prefixedName,
-          description: tool.description
-            ? `[MCP/${tool.serverName}] ${tool.description}`
-            : `[MCP/${tool.serverName}] ${tool.name}`,
-          input_schema: {
-            type: "object" as const,
-            properties: tool.inputSchema?.properties ?? {},
-            required: tool.inputSchema?.required,
-          },
-        });
-      }
-    }
-
-    return defs;
+  /** Return agent-compatible tool definitions for all discovered MCP tools. */
+  getToolDefinitions(): Array<{
+    name: string;
+    description: string;
+    input_schema: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+  }> {
+    return this.tools.map((tool) => ({
+      name: `mcp__${tool.serverName}__${tool.name}`,
+      description: tool.description
+        ? `[MCP/${tool.serverName}] ${tool.description}`
+        : `[MCP/${tool.serverName}] ${tool.name}`,
+      input_schema: {
+        type: "object" as const,
+        properties: tool.inputSchema?.properties ?? {},
+        required: tool.inputSchema?.required,
+      },
+    }));
   }
 
   /** Call an MCP tool by its prefixed name. */
@@ -321,14 +355,14 @@ export class McpManager {
     return this.toolMap.has(name);
   }
 
-  /** Disconnect all MCP servers. */
-  async disconnectAll(): Promise<void> {
-    const promises = Array.from(this.connections.values()).map((c) =>
-      c.disconnect().catch(() => {}),
-    );
-    await Promise.all(promises);
+  /** Close all MCP server connections. */
+  closeAll(): void {
+    for (const conn of this.connections.values()) {
+      conn.close();
+    }
     this.connections.clear();
     this.toolMap.clear();
+    this.tools = [];
   }
 
   /** Number of connected servers. */
