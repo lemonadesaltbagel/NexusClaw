@@ -8,7 +8,8 @@ import { AnthropicProvider } from "@/core/providers/anthropic";
 import { OpenAIProvider } from "@/core/providers/openai";
 import { buildSystemPrompt } from "@/core/prompt";
 import { getActiveToolDefinitions, CONCURRENCY_SAFE_TOOLS } from "@/tools/definitions";
-import { executeTool } from "@/tools/executor";
+import { executeTool, setMcpManager } from "@/tools/executor";
+import { McpManager } from "@/core/mcp";
 import { runRepl } from "@/cli/repl";
 import { getLatestSessionId, loadSession } from "@/core/session";
 import { printToolCall, printToolResult, printRetry, printConfirmation, printPlanForApproval, printPlanApprovalOptions } from "@/cli/ui";
@@ -91,6 +92,27 @@ export const chatCommand = new Command("chat")
     // --- Build system prompt and tools ---
     const system = buildSystemPrompt();
     const tools = getActiveToolDefinitions() as Anthropic.Messages.Tool[];
+
+    // --- Initialize MCP servers ---
+    const mcpManager = new McpManager();
+    const mcpConfigs = McpManager.loadConfigs();
+    if (Object.keys(mcpConfigs).length > 0) {
+      await mcpManager.connectAll(mcpConfigs);
+      setMcpManager(mcpManager);
+
+      // Add MCP tools to the tool list with full schemas
+      if (mcpManager.toolCount > 0) {
+        const mcpTools = await mcpManager.discoverTools();
+        for (const t of mcpTools) {
+          tools.push(t as Anthropic.Messages.Tool);
+        }
+      }
+    }
+
+    // Clean up MCP connections on exit
+    process.on("exit", () => { mcpManager.disconnectAll(); });
+    process.on("SIGINT", () => { mcpManager.disconnectAll(); });
+    process.on("SIGTERM", () => { mcpManager.disconnectAll(); });
 
     // --- Create agent ---
     // Don't pass "plan" directly — togglePlanMode() handles plan mode entry

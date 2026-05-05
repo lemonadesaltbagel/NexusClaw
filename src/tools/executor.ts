@@ -14,9 +14,21 @@ import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
 import { toolDefinitions, activatedTools } from "@/tools/definitions";
 import { executeSkill } from "@/core/skills";
+import type { McpManager } from "@/core/mcp";
 
 /** Tracks mtimeMs for files that have been read — used to enforce read-before-write. */
 export const readFileState = new Map<string, number>();
+
+/** Global MCP manager — set via setMcpManager() during startup. */
+let mcpManager: McpManager | null = null;
+
+export function setMcpManager(manager: McpManager): void {
+  mcpManager = manager;
+}
+
+export function getMcpManager(): McpManager | null {
+  return mcpManager;
+}
 
 const MAX_RESULT_CHARS = 50_000;
 
@@ -135,8 +147,14 @@ export async function executeTool(
       );
       break;
     }
-    default:
+    default: {
+      // Check if this is an MCP tool (prefixed with "mcp__")
+      if (mcpManager && mcpManager.isMcpTool(name)) {
+        result = await mcpManager.callTool(name, input);
+        break;
+      }
       return `Unknown tool: ${name}`;
+    }
   }
 
   return truncateResult(result);
