@@ -1,22 +1,27 @@
 import * as readline from "node:readline/promises";
+import chalk from "chalk";
 import type { Agent } from "@/core/agent";
 import { getSkillByName, resolveSkillPrompt } from "@/core/skills";
 
 // ---------------------------------------------------------------------------
-// Print helpers (stubs)
+// Print helpers
 // ---------------------------------------------------------------------------
 
 function printWelcome(): void {
-  // TODO: implement welcome banner
+  console.log(
+    chalk.bold.cyan("\n  NexusCode") +
+      chalk.gray(" — A minimal coding agent\n")
+  );
+  console.log(chalk.gray("  Type your request, or 'exit' to quit."));
+  console.log(chalk.gray("  Commands: /clear /plan /cost /compact /memory /skills\n"));
 }
 
 function printUserPrompt(): void {
-  // TODO: implement user prompt indicator
+  process.stdout.write(chalk.bold.green("\n> "));
 }
 
 function printError(message: string): void {
-  // TODO: implement styled error output
-  console.error(message);
+  console.error(chalk.red(`\n  Error: ${message}`));
 }
 
 // ---------------------------------------------------------------------------
