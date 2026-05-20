@@ -1,9 +1,8 @@
 // ---------------------------------------------------------------------------
 // `nexuscode serve` — long-running remote-control mode.
 //
-// Stage 1: scaffolding only. The Gateway is wired up and ready, but no
-// concrete platform adapter is registered yet. Stage 2 will add the
-// Telegram adapter and register it here.
+// Loads ~/.nexusclaw/nexusclaw.json, wires the configured platform
+// adapters into the Gateway, and keeps the process alive.
 // ---------------------------------------------------------------------------
 
 import { Command } from "commander";
@@ -22,8 +21,15 @@ import { McpManager } from "@/core/mcp";
 import { loadSession, getLatestSessionId } from "@/core/session";
 
 import { Gateway } from "@/remote/gateway";
-import type { AgentCallbacks, AgentFactory, IdentityResolver } from "@/remote/gateway";
+import type { AgentCallbacks, AgentFactory } from "@/remote/gateway";
 import type { PlatformAdapter } from "@/remote/types";
+import {
+  loadSettings,
+  buildIdentityResolver,
+  DEFAULT_SETTINGS_PATH,
+  type NexusClawSettings,
+} from "@/remote/settings";
+import { TelegramAdapter } from "@/remote/adapters/telegram";
 
 // ---------------------------------------------------------------------------
 // Provider + key resolution (mirrors chatCommand).
@@ -70,9 +76,8 @@ function buildAgentFactory(env: FactoryEnv): AgentFactory {
       planApprovalFn: cb.planApprovalFn,
     });
 
-    // Best-effort session restore: stage-1 uses the most recent session
-    // for any user (per-user session namespacing arrives in stage 2 along
-    // with the settings schema).
+    // Best-effort session restore. Per-user session namespacing is deferred:
+    // for now any remote user inherits the latest CLI session if one exists.
     const latestId = getLatestSessionId();
     if (latestId) {
       const session = loadSession(latestId);
@@ -84,25 +89,40 @@ function buildAgentFactory(env: FactoryEnv): AgentFactory {
 }
 
 // ---------------------------------------------------------------------------
-// IdentityResolver — stage 1 default: deny everything. The Telegram
-// adapter (stage 2) will ship with a settings-driven whitelist that maps
-// native ids to canonical user ids.
+// Adapter registration — read settings and instantiate every enabled
+// adapter. New platforms only need a branch here.
 // ---------------------------------------------------------------------------
 
-const denyAll: IdentityResolver = () => null;
+function buildAdapters(settings: NexusClawSettings | null): PlatformAdapter[] {
+  if (!settings) return [];
+  const adapters: PlatformAdapter[] = [];
+  if (settings.remote.telegram) {
+    adapters.push(new TelegramAdapter({ token: settings.remote.telegram.token }));
+  }
+  return adapters;
+}
 
 // ---------------------------------------------------------------------------
 // Serve command
 // ---------------------------------------------------------------------------
 
 export const serveCommand = new Command("serve")
-  .description("Run NexusCode as a remote-control server (stage 1: scaffolding only)")
+  .description("Run NexusCode as a remote-control server")
   .option("-m, --model <model>", "Model to use", process.env.MINI_CLAUDE_MODEL || "claude-opus-4-6")
   .option("--api-base <url>", "Custom API base URL")
+  .option("--config <path>", "Path to nexusclaw.json", DEFAULT_SETTINGS_PATH)
   .action(async (opts) => {
     const apiKey = resolveApiKey(opts.apiBase);
     if (!apiKey) {
       console.error("Error: API key is required. Set ANTHROPIC_API_KEY or OPENAI_API_KEY env var.");
+      process.exit(1);
+    }
+
+    let settings: NexusClawSettings | null;
+    try {
+      settings = loadSettings(opts.config);
+    } catch (err) {
+      console.error(`Error: failed to load settings from ${opts.config}: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }
 
@@ -120,7 +140,7 @@ export const serveCommand = new Command("serve")
     }
 
     const gateway = new Gateway({
-      resolveIdentity: denyAll,
+      resolveIdentity: buildIdentityResolver(settings),
       agentFactory: buildAgentFactory({
         provider,
         providerType: opts.apiBase ? "openai" : "anthropic",
@@ -130,17 +150,15 @@ export const serveCommand = new Command("serve")
       }),
     });
 
-    // Stage 2 will register adapters here:
-    //   gateway.registerAdapter(new TelegramAdapter({ token, userMap }));
-    const adapters: PlatformAdapter[] = [];
+    const adapters = buildAdapters(settings);
     for (const a of adapters) gateway.registerAdapter(a);
 
     await gateway.start();
 
-    console.log(chalk.bold.cyan("\n  NexusCode") + chalk.gray(" — remote-control mode"));
+    console.log(chalk.bold.cyan("\n  NexusClaw") + chalk.gray(" — remote-control mode"));
     if (adapters.length === 0) {
-      console.log(chalk.yellow("  No platform adapters registered (stage-1 scaffolding)."));
-      console.log(chalk.gray("  Stage 2 will plug in Telegram here."));
+      console.log(chalk.yellow(`  No platform adapters registered.`));
+      console.log(chalk.gray(`  Add credentials under "remote" in ${opts.config}.`));
     } else {
       console.log(chalk.gray(`  Adapters: ${adapters.map((a) => a.name).join(", ")}`));
     }
