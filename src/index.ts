@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { program } from "commander";
 import { chatCommand } from "@/cli/commands";
+import { serveCommand } from "@/cli/serve";
 
 program
   .name("nexuscode")
@@ -8,5 +9,6 @@ program
   .version("0.1.0");
 
 program.addCommand(chatCommand, { isDefault: true });
+program.addCommand(serveCommand);
 
 program.parse();
