@@ -864,3 +864,231 @@ describe("forum routing", () => {
     expect(calls[0]!.topicId).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stage 7 — obvious-fix items
+// ---------------------------------------------------------------------------
+
+import { streamKey } from "@/remote/adapters/telegram";
+
+describe("streamKey", () => {
+  test("composes chatId + topicId + userId", () => {
+    expect(streamKey({ platform: "telegram", userId: "42", chatId: "-100", topicId: "7" }))
+      .toBe("-100:7:42");
+  });
+  test("blank topic segment when topicId is absent", () => {
+    expect(streamKey({ platform: "telegram", userId: "42", chatId: "-100" }))
+      .toBe("-100::42");
+  });
+  test("two users in the same chat produce different keys", () => {
+    const a = streamKey({ platform: "telegram", userId: "1", chatId: "-100" });
+    const b = streamKey({ platform: "telegram", userId: "2", chatId: "-100" });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("caption fallback", () => {
+  function makeCaptionedPhoto(opts: { updateId: number; userId: number; caption: string }): unknown {
+    return {
+      update_id: opts.updateId,
+      message: {
+        message_id: opts.updateId * 100,
+        date: 1234567890,
+        chat: { id: opts.userId, type: "private" },
+        from: { id: opts.userId, is_bot: false, first_name: "U" },
+        photo: [{ file_id: "f1", file_unique_id: "u1", width: 10, height: 10 }],
+        caption: opts.caption,
+      },
+    };
+  }
+
+  test("photo+caption from a known user dispatches the caption as text", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed(makeCaptionedPhoto({ updateId: 1, userId: 42, caption: "summarize this" }));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "message", text: "summarize this" });
+  });
+
+  test("photo with no text and no caption is still dropped", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed({
+      update_id: 1,
+      message: {
+        message_id: 100,
+        date: 1234567890,
+        chat: { id: 42, type: "private" },
+        from: { id: 42, is_bot: false, first_name: "U" },
+        photo: [{ file_id: "f1", file_unique_id: "u1", width: 10, height: 10 }],
+      },
+    });
+    expect(events).toEqual([]);
+  });
+});
+
+describe("empty / whitespace text", () => {
+  test("a whitespace-only DM is dropped", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed(makeTextUpdate(1, "   "));
+    expect(events).toEqual([]);
+  });
+
+  test("a /cmd@otherbot DM that strips to empty is dropped", async () => {
+    // stripBotMention returns null for /cmd@otherbot, so this is already
+    // covered upstream — but check that mention-stripping plus trim gives
+    // the same drop semantics. /clear@test is OUR bot, no stripping
+    // produces an empty result, so use a pure-whitespace text instead.
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed(makeTextUpdate(1, "\n\t  \n"));
+    expect(events).toEqual([]);
+  });
+});
+
+describe("callback_query access gate", () => {
+  function makeCallbackUpdate(opts: {
+    updateId: number; fromId: number; chatId: number;
+    chatType?: "private" | "group" | "supergroup";
+    data: string;
+  }): unknown {
+    return {
+      update_id: opts.updateId,
+      callback_query: {
+        id: String(opts.updateId * 10),
+        from: { id: opts.fromId, is_bot: false, first_name: "U" },
+        chat_instance: "ci",
+        message: {
+          message_id: 100,
+          date: 1234567890,
+          chat: { id: opts.chatId, type: opts.chatType ?? "private" },
+          from: { id: 1, is_bot: true, first_name: "Bot" },
+          text: "prompt",
+        },
+        data: opts.data,
+      },
+    };
+  }
+
+  test("callback in a non-configured group is dropped without resolving", async () => {
+    // Set up an adapter with a pending prompt, then deliver a callback
+    // from an unauthorized group.
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // Register a pending prompt so we can detect resolution.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { id } = (adapter as any).prompts.register("confirm");
+    // Drive a callback from a group with no policy.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makeCallbackUpdate({
+      updateId: 1, fromId: 99, chatId: -100, chatType: "supergroup",
+      data: `prompt:${id}:allow`,
+    }));
+    // The pending prompt should still be unresolved.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const remaining = (adapter as any).prompts.resolve(id, "allow");
+    expect(remaining).toBe(true); // we just resolved it now — proves it wasn't resolved by the callback
+  });
+
+  test("callback in a configured open group is resolved", async () => {
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({
+      token: "t", sender,
+      access: { groups: { "-100": { policy: "open" } } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { id, promise } = (adapter as any).prompts.register("confirm");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makeCallbackUpdate({
+      updateId: 1, fromId: 42, chatId: -100, chatType: "supergroup",
+      data: `prompt:${id}:allow`,
+    }));
+    const reply = await promise;
+    expect(reply).toEqual({ kind: "confirm", allowed: true });
+  });
+
+  test("DM callback from an unknown user is dropped", async () => {
+    const dm = dmProvider("allowlist", { known: ["42"] });
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { id } = (adapter as any).prompts.register("confirm");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makeCallbackUpdate({
+      updateId: 1, fromId: 99, chatId: 99, data: `prompt:${id}:allow`,
+    }));
+    // Prompt should still be resolvable from inside.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((adapter as any).prompts.resolve(id, "allow")).toBe(true);
+  });
+
+  test("DM callback from a known user resolves the prompt", async () => {
+    const dm = dmProvider("allowlist", { known: ["42"] });
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { id, promise } = (adapter as any).prompts.register("confirm");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makeCallbackUpdate({
+      updateId: 1, fromId: 42, chatId: 42, data: `prompt:${id}:allow`,
+    }));
+    const reply = await promise;
+    expect(reply).toEqual({ kind: "confirm", allowed: true });
+  });
+});
+
+describe("multi-user streaming isolation", () => {
+  test("two users in the same chat get separate streaming messages", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    const idA = { platform: "telegram", userId: "1", chatId: "-100" } as const;
+    const idB = { platform: "telegram", userId: "2", chatId: "-100" } as const;
+    await adapter.send(idA, { kind: "text", delta: "from A" });
+    await adapter.send(idB, { kind: "text", delta: "from B" });
+    // Give sendFirst a microtask cycle.
+    await new Promise((r) => setTimeout(r, 5));
+    const sends = calls.filter((c) => c.op === "send");
+    expect(sends.map((s) => s.text)).toEqual(["from A", "from B"]);
+  });
+
+  test("turn_done for one user leaves the other user's stream intact", async () => {
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    const idA = { platform: "telegram", userId: "1", chatId: "-100" } as const;
+    const idB = { platform: "telegram", userId: "2", chatId: "-100" } as const;
+    await adapter.send(idA, { kind: "text", delta: "a1" });
+    await adapter.send(idB, { kind: "text", delta: "b1" });
+    await adapter.send(idA, { kind: "turn_done" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const streams: Map<string, unknown> = (adapter as any).streams;
+    expect(streams.has(streamKey(idA))).toBe(false);
+    expect(streams.has(streamKey(idB))).toBe(true);
+  });
+});
+
+describe("my_chat_member subscription", () => {
+  test("a my_chat_member update is delivered (no event emitted, just logged)", async () => {
+    const { events, feed } = makeAdapter();
+    await feed({
+      update_id: 1,
+      my_chat_member: {
+        chat: { id: -100, type: "supergroup", title: "G" },
+        from: { id: 42, is_bot: false, first_name: "U" },
+        date: 1234567890,
+        old_chat_member: { user: { id: 1, is_bot: true, first_name: "Bot" }, status: "left" },
+        new_chat_member: { user: { id: 1, is_bot: true, first_name: "Bot" }, status: "member" },
+      },
+    });
+    // No RemoteEvent should be emitted.
+    expect(events).toEqual([]);
+  });
+});

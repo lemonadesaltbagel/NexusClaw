@@ -217,6 +217,15 @@ export function parseInboundText(
 }
 
 /**
+ * Streaming-message map key. Includes userId + topicId so two users in the
+ * same group (or two topics in the same forum) keep separate in-flight
+ * messages instead of corrupting each other's buffers.
+ */
+export function streamKey(id: RemoteIdentity): string {
+  return `${id.chatId}:${id.topicId ?? ""}:${id.userId}`;
+}
+
+/**
  * Resolve `/cmd@botname args…` in group commands. Returns:
  *   - the original text if not a command, or a command with no `@` mention
  *   - the stripped text (`/cmd args…`) if the mention matches our bot
@@ -318,10 +327,11 @@ export class TelegramAdapter implements PlatformAdapter {
   async send(to: RemoteIdentity, out: RemoteOutput): Promise<void> {
     switch (out.kind) {
       case "text": {
-        let sm = this.streams.get(to.chatId);
+        const key = streamKey(to);
+        let sm = this.streams.get(key);
         if (!sm) {
           sm = new StreamingMessage(to.chatId, this.sender, undefined, to.topicId);
-          this.streams.set(to.chatId, sm);
+          this.streams.set(key, sm);
         }
         sm.pushDelta(out.delta);
         return;
@@ -336,10 +346,11 @@ export class TelegramAdapter implements PlatformAdapter {
         await this.sender.send(to.chatId, renderSystem(out.level, out.text), undefined, to.topicId);
         return;
       case "turn_done": {
-        const sm = this.streams.get(to.chatId);
+        const key = streamKey(to);
+        const sm = this.streams.get(key);
         if (sm) {
           await sm.finalize();
-          this.streams.delete(to.chatId);
+          this.streams.delete(key);
         }
         return;
       }
@@ -446,12 +457,13 @@ export class TelegramAdapter implements PlatformAdapter {
         }
       }
 
-      // Access granted. Now branch on content. Media is dropped — agent
-      // core does not yet handle non-text.
-      const text = ctx.message.text;
+      // Access granted. Pick up the user's text from either `text` (plain
+      // text message) or `caption` (text attached to a photo/video/document).
+      // The media itself is dropped — agent core does not yet handle it.
+      const text = ctx.message.text ?? ctx.message.caption;
       if (text === undefined) {
         console.debug(
-          `telegram: dropping non-text message from ${ctx.from.id} — media unsupported`,
+          `telegram: dropping non-text message from ${ctx.from.id} — no text or caption`,
         );
         return;
       }
@@ -461,6 +473,10 @@ export class TelegramAdapter implements PlatformAdapter {
       // Resolve /cmd@botname in groups before parsing.
       const cleaned = stripBotMention(text, ctx.me.username);
       if (cleaned === null) return;  // command was addressed to another bot
+      if (cleaned.trim() === "") {
+        console.debug(`telegram: dropping empty message from ${ctx.from.id}`);
+        return;
+      }
 
       const from: RemoteIdentity = {
         platform: "telegram",
@@ -468,6 +484,10 @@ export class TelegramAdapter implements PlatformAdapter {
         chatId: String(ctx.chat.id),
         ...(space.kind === "forum" ? { topicId: space.topicId } : {}),
       };
+      console.debug(
+        `telegram: accept from ${from.userId} in chat ${from.chatId}` +
+        (from.topicId ? `/${from.topicId}` : ""),
+      );
       this.handler(parseInboundText(cleaned, from));
     });
 
@@ -475,10 +495,53 @@ export class TelegramAdapter implements PlatformAdapter {
     // and dedups them. By design we do not forward edits to the agent.
     this.bot.on("edited_message", () => {});
 
+    // Subscribe to membership changes affecting the bot itself. grammY only
+    // includes this in allowed_updates when there's a registered handler.
+    // We just log so operators notice the bot being added/removed somewhere.
+    this.bot.on("my_chat_member", (ctx) => {
+      const chat = ctx.chat;
+      const status = ctx.myChatMember.new_chat_member.status;
+      console.error(
+        `telegram: my_chat_member — chat ${chat.id} (${chat.type}) → ${status}`,
+      );
+    });
+
     this.bot.on("callback_query:data", async (ctx) => {
+      // Always answer first so the user's loading spinner clears, even if
+      // we end up dropping the payload.
+      try { await ctx.answerCallbackQuery(); } catch { /* best-effort */ }
+
+      if (!ctx.from || !ctx.chat) return;
+      if (isSelfMessage(ctx.from.id, ctx.me.id)) return;
+
+      // The originating message carries the thread id for forum chats.
+      const cbMessage = ctx.callbackQuery.message ?? {};
+      const space = classifyChat(ctx.chat, cbMessage);
+      if (space.kind === "channel") return;
+
+      const userId = String(ctx.from.id);
+      if (space.kind !== "dm") {
+        const decision = checkGroupAccess(space, userId, this.access);
+        if (!decision.allowed) {
+          console.debug(
+            `telegram: dropping callback_query from ${userId} ` +
+            `in chat ${ctx.chat.id} — ${decision.reason}`,
+          );
+          return;
+        }
+      } else if (this.dm) {
+        // DM callbacks only make sense for already-known users — strangers
+        // have no in-flight prompts to resolve, and `disable` blocks all.
+        if (this.dm.policy === "disable" || !this.dm.isKnown(userId)) {
+          console.debug(
+            `telegram: dropping callback_query from ${userId} — not allowed in DM`,
+          );
+          return;
+        }
+      }
+
       const parsed = parsePromptCallback(ctx.callbackQuery.data);
       if (parsed) this.prompts.resolve(parsed.id, parsed.choice);
-      try { await ctx.answerCallbackQuery(); } catch { /* best-effort */ }
     });
   }
 }
