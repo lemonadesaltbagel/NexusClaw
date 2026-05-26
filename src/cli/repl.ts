@@ -9,8 +9,8 @@ import { getSkillByName, resolveSkillPrompt } from "@/core/skills";
 
 function printWelcome(): void {
   console.log(
-    chalk.bold.cyan("\n  NexusCode") +
-      chalk.gray(" — A minimal coding agent\n")
+    chalk.bold.cyan("\n  NexusClaw") +
+      chalk.gray(" — assistant CLI\n")
   );
   console.log(chalk.gray("  Type your request, or 'exit' to quit."));
   console.log(chalk.gray("  Commands: /clear /plan /cost /compact /memory /skills\n"));

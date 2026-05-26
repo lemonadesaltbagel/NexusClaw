@@ -1,8 +1,12 @@
 // ---------------------------------------------------------------------------
-// `nexuscode serve` — long-running remote-control mode.
+// `nexusclaw serve` — long-running remote-control mode.
 //
 // Loads ~/.nexusclaw/nexusclaw.json, wires the configured platform
 // adapters into the Gateway, and keeps the process alive.
+//
+// State that changes at runtime (userMap, pairing pending) lives in shared
+// mutable maps. File watchers on nexusclaw.json and pairing.json re-hydrate
+// these maps so pairing approvals take effect with no restart.
 // ---------------------------------------------------------------------------
 
 import { Command } from "commander";
@@ -22,14 +26,22 @@ import { loadSession, getLatestSessionId } from "@/core/session";
 
 import { Gateway } from "@/remote/gateway";
 import type { AgentCallbacks, AgentFactory } from "@/remote/gateway";
-import type { PlatformAdapter } from "@/remote/types";
+import type { PlatformAdapter, RemoteIdentity } from "@/remote/types";
 import {
   loadSettings,
-  buildIdentityResolver,
+  watchSettings,
+  appendUserMap,
   DEFAULT_SETTINGS_PATH,
   type NexusClawSettings,
 } from "@/remote/settings";
-import { TelegramAdapter } from "@/remote/adapters/telegram";
+import {
+  loadPairing,
+  watchPairing,
+  addPending,
+  DEFAULT_PAIRING_PATH,
+} from "@/remote/pairing";
+import { TelegramAdapter, type DmAccessProvider } from "@/remote/adapters/telegram";
+import { generatePairingCode } from "@/remote/adapters/telegram-dm";
 
 // ---------------------------------------------------------------------------
 // Provider + key resolution (mirrors chatCommand).
@@ -46,9 +58,7 @@ function createProvider(apiKey: string, apiBase?: string): Provider {
 }
 
 // ---------------------------------------------------------------------------
-// AgentFactory — provider, MCP, tools, system prompt are built once at
-// startup; each canonical user gets a fresh Agent with their own callbacks
-// and (where present) restored session.
+// AgentFactory
 // ---------------------------------------------------------------------------
 
 interface FactoryEnv {
@@ -75,29 +85,111 @@ function buildAgentFactory(env: FactoryEnv): AgentFactory {
       confirmDangerous: cb.confirmDangerous,
       planApprovalFn: cb.planApprovalFn,
     });
-
-    // Best-effort session restore. Per-user session namespacing is deferred:
-    // for now any remote user inherits the latest CLI session if one exists.
     const latestId = getLatestSessionId();
     if (latestId) {
       const session = loadSession(latestId);
       if (session) agent.restoreSession(session);
     }
-
     return agent;
   };
 }
 
 // ---------------------------------------------------------------------------
-// Adapter registration — read settings and instantiate every enabled
-// adapter. New platforms only need a branch here.
+// Shared runtime state for the Telegram adapter — the live source of truth
+// for userMap and pairing pending. File watchers re-hydrate them.
 // ---------------------------------------------------------------------------
 
-function buildAdapters(settings: NexusClawSettings | null): PlatformAdapter[] {
+interface TelegramState {
+  /** telegramUserId → canonicalUserId. */
+  knownMap: Map<string, string>;
+  /** telegramUserId → pairing code (waiting for approval). */
+  pendingByUser: Map<string, string>;
+}
+
+function rehydrateKnown(state: TelegramState, settings: NexusClawSettings | null): void {
+  state.knownMap.clear();
+  if (!settings?.remote.telegram) return;
+  for (const [k, v] of Object.entries(settings.remote.telegram.userMap)) {
+    state.knownMap.set(k, v);
+  }
+}
+
+function rehydratePending(state: TelegramState, pairingPath: string): void {
+  state.pendingByUser.clear();
+  try {
+    const p = loadPairing(pairingPath);
+    for (const [userId, req] of Object.entries(p.telegram.pending)) {
+      state.pendingByUser.set(userId, req.code);
+    }
+  } catch (err) {
+    console.error(`pairing: failed to reload — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function fallbackCanonical(userId: string, username?: string): string {
+  return username && username.length > 0 ? username : `tg_${userId}`;
+}
+
+function buildTelegramDmProvider(
+  state: TelegramState,
+  settings: NexusClawSettings,
+  configPath: string,
+  pairingPath: string,
+): DmAccessProvider {
+  const policy = settings.remote.telegram!.dm.policy;
+  return {
+    policy,
+    isKnown:   (id) => state.knownMap.has(id),
+    isPending: (id) => state.pendingByUser.has(id),
+    registerPending: (req) => {
+      const existing = state.pendingByUser.get(req.userId);
+      if (existing) return existing;
+      const code = generatePairingCode();
+      state.pendingByUser.set(req.userId, code);
+      try {
+        addPending("telegram", req.userId, {
+          code,
+          username:    req.username,
+          firstName:   req.firstName,
+          requestedAt: new Date().toISOString(),
+        }, pairingPath);
+      } catch (err) {
+        console.error(`pairing: failed to persist — ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return code;
+    },
+    registerKnown: (req) => {
+      if (state.knownMap.has(req.userId)) return;
+      const canonical = fallbackCanonical(req.userId, req.username);
+      state.knownMap.set(req.userId, canonical);
+      try {
+        appendUserMap("telegram", req.userId, canonical, configPath);
+      } catch (err) {
+        console.error(`settings: failed to persist userMap — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Adapter registration
+// ---------------------------------------------------------------------------
+
+function buildAdapters(
+  settings: NexusClawSettings | null,
+  state: TelegramState,
+  configPath: string,
+  pairingPath: string,
+): PlatformAdapter[] {
   if (!settings) return [];
   const adapters: PlatformAdapter[] = [];
   if (settings.remote.telegram) {
-    adapters.push(new TelegramAdapter({ token: settings.remote.telegram.token }));
+    adapters.push(new TelegramAdapter({
+      token: settings.remote.telegram.token,
+      verbose: process.env.TELEGRAM_VERBOSE === "1",
+      access: { groups: settings.remote.telegram.groups },
+      dm: buildTelegramDmProvider(state, settings, configPath, pairingPath),
+    }));
   }
   return adapters;
 }
@@ -107,10 +199,11 @@ function buildAdapters(settings: NexusClawSettings | null): PlatformAdapter[] {
 // ---------------------------------------------------------------------------
 
 export const serveCommand = new Command("serve")
-  .description("Run NexusCode as a remote-control server")
+  .description("Run NexusClaw as a remote-control server")
   .option("-m, --model <model>", "Model to use", process.env.MINI_CLAUDE_MODEL || "claude-opus-4-6")
   .option("--api-base <url>", "Custom API base URL")
   .option("--config <path>", "Path to nexusclaw.json", DEFAULT_SETTINGS_PATH)
+  .option("--pairing-path <path>", "Path to pairing.json", DEFAULT_PAIRING_PATH)
   .action(async (opts) => {
     const apiKey = resolveApiKey(opts.apiBase);
     if (!apiKey) {
@@ -126,6 +219,11 @@ export const serveCommand = new Command("serve")
       process.exit(1);
     }
 
+    // Live runtime state — populated from disk now, kept in sync by watchers.
+    const tgState: TelegramState = { knownMap: new Map(), pendingByUser: new Map() };
+    rehydrateKnown(tgState, settings);
+    rehydratePending(tgState, opts.pairingPath);
+
     const provider = createProvider(apiKey, opts.apiBase);
     const systemPrompt = buildSystemPrompt();
     const tools = getActiveToolDefinitions();
@@ -139,8 +237,14 @@ export const serveCommand = new Command("serve")
       }
     }
 
+    // The gateway resolver consults the live knownMap, not a frozen
+    // snapshot, so pairing approvals + open-policy auto-registrations
+    // take effect immediately.
     const gateway = new Gateway({
-      resolveIdentity: buildIdentityResolver(settings),
+      resolveIdentity: (id: RemoteIdentity): string | null => {
+        if (id.platform !== "telegram") return null;
+        return tgState.knownMap.get(id.userId) ?? null;
+      },
       agentFactory: buildAgentFactory({
         provider,
         providerType: opts.apiBase ? "openai" : "anthropic",
@@ -150,10 +254,23 @@ export const serveCommand = new Command("serve")
       }),
     });
 
-    const adapters = buildAdapters(settings);
+    const adapters = buildAdapters(settings, tgState, opts.config, opts.pairingPath);
     for (const a of adapters) gateway.registerAdapter(a);
 
     await gateway.start();
+
+    // Hot reload: external edits + the pairing CLI both flow through here.
+    const settingsWatcher = watchSettings(() => {
+      try {
+        const next = loadSettings(opts.config);
+        rehydrateKnown(tgState, next);
+      } catch (err) {
+        console.error(`settings: reload failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, opts.config);
+    const pairingWatcher = watchPairing(() => {
+      rehydratePending(tgState, opts.pairingPath);
+    }, opts.pairingPath);
 
     console.log(chalk.bold.cyan("\n  NexusClaw") + chalk.gray(" — remote-control mode"));
     if (adapters.length === 0) {
@@ -161,18 +278,22 @@ export const serveCommand = new Command("serve")
       console.log(chalk.gray(`  Add credentials under "remote" in ${opts.config}.`));
     } else {
       console.log(chalk.gray(`  Adapters: ${adapters.map((a) => a.name).join(", ")}`));
+      if (settings?.remote.telegram) {
+        console.log(chalk.gray(`  Telegram DM policy: ${settings.remote.telegram.dm.policy}`));
+      }
     }
     console.log(chalk.gray("  Press Ctrl+C to stop.\n"));
 
     const shutdown = async (): Promise<void> => {
       console.log(chalk.gray("\n  Shutting down…"));
+      settingsWatcher.close();
+      pairingWatcher.close();
       await gateway.stop();
       mcpManager.closeAll();
       process.exit(0);
     };
-    process.on("SIGINT", () => { void shutdown(); });
+    process.on("SIGINT",  () => { void shutdown(); });
     process.on("SIGTERM", () => { void shutdown(); });
 
-    // Keep the process alive even when no adapters are registered.
     await new Promise<void>(() => {});
   });

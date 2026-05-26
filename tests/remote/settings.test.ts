@@ -36,7 +36,12 @@ describe("loadSettings", () => {
       remote: { telegram: { token: "abc:123", userMap: { "42": "xintian" } } },
     }));
     const s = loadSettings(configPath);
-    expect(s?.remote.telegram).toEqual({ token: "abc:123", userMap: { "42": "xintian" } });
+    expect(s?.remote.telegram).toEqual({
+      token: "abc:123",
+      userMap: { "42": "xintian" },
+      groups: {},
+      dm: { policy: "allowlist" },
+    });
   });
 
   test("defaults userMap to {} when omitted", () => {
@@ -45,6 +50,49 @@ describe("loadSettings", () => {
     }));
     const s = loadSettings(configPath);
     expect(s?.remote.telegram?.userMap).toEqual({});
+  });
+
+  test("defaults groups to {} when omitted", () => {
+    writeFileSync(configPath, JSON.stringify({
+      remote: { telegram: { token: "abc:123" } },
+    }));
+    const s = loadSettings(configPath);
+    expect(s?.remote.telegram?.groups).toEqual({});
+  });
+
+  test("parses a group policy block", () => {
+    writeFileSync(configPath, JSON.stringify({
+      remote: {
+        telegram: {
+          token: "abc:123",
+          groups: {
+            "-100": {
+              policy: "allowlist",
+              allowedUsers: ["42"],
+              topics: { "7": { enabled: true } },
+            },
+          },
+        },
+      },
+    }));
+    const s = loadSettings(configPath);
+    expect(s?.remote.telegram?.groups["-100"]).toEqual({
+      policy: "allowlist",
+      allowedUsers: ["42"],
+      topics: { "7": { enabled: true } },
+    });
+  });
+
+  test("rejects an unknown policy value", () => {
+    writeFileSync(configPath, JSON.stringify({
+      remote: {
+        telegram: {
+          token: "abc:123",
+          groups: { "-100": { policy: "nope" } },
+        },
+      },
+    }));
+    expect(() => loadSettings(configPath)).toThrow();
   });
 
   test("throws on missing telegram token", () => {
@@ -60,7 +108,11 @@ describe("loadSettings", () => {
 
 describe("buildIdentityResolver", () => {
   function settingsWithMap(map: Record<string, string>): NexusClawSettings {
-    return { remote: { telegram: { token: "t", userMap: map } } };
+    return {
+      remote: {
+        telegram: { token: "t", userMap: map, groups: {}, dm: { policy: "allowlist" } },
+      },
+    };
   }
 
   test("denies everything when settings is null", () => {

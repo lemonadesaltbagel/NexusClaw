@@ -18,6 +18,19 @@ import type {
   RemotePrompt,
   RemotePromptReply,
 } from "@/remote/types";
+import { Sequentializer } from "@/remote/sequentializer";
+import { verboseLogUpdate } from "@/remote/adapters/telegram-verbose";
+import {
+  classifyChat,
+  isSelfMessage,
+  checkGroupAccess,
+  type AccessSettings,
+} from "@/remote/adapters/telegram-access";
+import {
+  checkDmAccess,
+  formatPairingPrompt,
+  type DmPolicyKind,
+} from "@/remote/adapters/telegram-dm";
 
 // ---------------------------------------------------------------------------
 // Limits + tunables
@@ -197,10 +210,35 @@ export function parseInboundText(
 // TelegramAdapter
 // ---------------------------------------------------------------------------
 
+/**
+ * Pluggable DM access surface. The adapter calls these methods; the serve
+ * process implements them against the live userMap + pairing.json state so
+ * approvals take effect without restart.
+ */
+export interface DmAccessProvider {
+  policy: DmPolicyKind;
+  isKnown(userId: string): boolean;
+  isPending(userId: string): boolean;
+  /** Generate or reuse a pairing code for this stranger. */
+  registerPending(req: {
+    userId: string;
+    username?: string;
+    firstName?: string;
+  }): string;
+  /** Auto-add a user under `open` policy. */
+  registerKnown(req: { userId: string; username?: string }): void;
+}
+
 export interface TelegramAdapterOptions {
   token: string;
   /** Override the sender (used in tests to skip the Bot API). */
   sender?: Sender;
+  /** Dump every raw Update with truncation. */
+  verbose?: boolean;
+  /** Group/forum access rules. */
+  access?: AccessSettings;
+  /** DM access policy + state. Absent means DMs fall through to the gateway. */
+  dm?: DmAccessProvider;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -211,10 +249,18 @@ export class TelegramAdapter implements PlatformAdapter {
   private handler: ((e: RemoteEvent) => void) | null = null;
   private streams = new Map<string, StreamingMessage>();
   private prompts = new PromptRegistry();
+  private verbose: boolean;
+  private access: AccessSettings;
+  private dm: DmAccessProvider | null;
+  private pendingUpdateIds = new Set<number>();
+  private sequentializer = new Sequentializer();
 
   constructor(opts: TelegramAdapterOptions) {
     this.bot = new Bot(opts.token);
     this.sender = opts.sender ?? this.defaultSender();
+    this.verbose = opts.verbose ?? false;
+    this.access = opts.access ?? {};
+    this.dm = opts.dm ?? null;
     this.wireHandlers();
   }
 
@@ -304,8 +350,71 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   private wireHandlers(): void {
+    // Inbound middleware — runs before any bot.on(...) handler matches.
+    // Responsibilities: verbose-log the raw Update, discard duplicates by
+    // update_id, and gate downstream handlers through the Sequentializer
+    // so updates dispatch strictly one at a time.
+    this.bot.use(async (ctx, next) => {
+      if (this.verbose) verboseLogUpdate(ctx.update);
+      const id = ctx.update.update_id;
+      if (this.pendingUpdateIds.has(id)) {
+        console.debug(`telegram: discarding duplicate update ${id}`);
+        return;
+      }
+      this.pendingUpdateIds.add(id);
+      try {
+        await this.sequentializer.submit(() => next());
+      } finally {
+        this.pendingUpdateIds.delete(id);
+      }
+    });
+
     this.bot.on("message:text", (ctx) => {
-      if (!this.handler || !ctx.from || !ctx.chat) return;
+      if (!ctx.from || !ctx.chat) return;
+
+      // Drop self-echoed messages defensively (e.g. multi-bot / forwarded).
+      if (isSelfMessage(ctx.from.id, ctx.me.id)) return;
+
+      const space = classifyChat(ctx.chat, ctx.message);
+      if (space.kind === "channel") return;
+
+      if (space.kind !== "dm") {
+        const decision = checkGroupAccess(space, String(ctx.from.id), this.access);
+        if (!decision.allowed) {
+          console.debug(
+            `telegram: dropping ${space.kind} message from ${ctx.from.id} ` +
+            `in chat ${ctx.chat.id} — ${decision.reason}`,
+          );
+          return;
+        }
+      } else if (this.dm) {
+        // DM policy enforcement. Absent provider = fall through (legacy).
+        const userId = String(ctx.from.id);
+        const decision = checkDmAccess(userId, {
+          policy: this.dm.policy,
+          isKnown:   (id) => this.dm!.isKnown(id),
+          isPending: (id) => this.dm!.isPending(id),
+        });
+        if (decision.kind === "drop") {
+          console.debug(`telegram: dropping dm from ${userId} — ${decision.reason}`);
+          return;
+        }
+        if (decision.kind === "pair_prompt") {
+          const code = this.dm.registerPending({
+            userId,
+            username:  ctx.from.username,
+            firstName: ctx.from.first_name,
+          });
+          void this.sender.send(String(ctx.chat.id), formatPairingPrompt(userId, code));
+          return;
+        }
+        if (decision.kind === "allow_and_register") {
+          this.dm.registerKnown({ userId, username: ctx.from.username });
+        }
+      }
+
+      if (!this.handler) return;
+
       const from: RemoteIdentity = {
         platform: "telegram",
         userId: String(ctx.from.id),

@@ -1,10 +1,10 @@
 {
-  "name": "nexuscode",
+  "name": "nexusclaw",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
   "bin": {
-    "nexuscode": "src/index.ts"
+    "nexusclaw": "src/index.ts"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
