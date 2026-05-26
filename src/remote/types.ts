@@ -14,6 +14,14 @@ export interface RemoteIdentity {
   userId: string;
   /** Native chat/channel/conversation id — used for replies and rate scope. */
   chatId: string;
+  /**
+   * Sub-channel within `chatId`. Telegram forum topic id, Slack thread ts,
+   * etc. Used by the originating adapter to route replies back into the
+   * exact thread. NOT part of identityKey: messages from the same user
+   * across multiple topics should still serialize through one per-user
+   * lane in the gateway.
+   */
+  topicId?: string;
 }
 
 /** A unique key derived from a RemoteIdentity (used as a Map key). */

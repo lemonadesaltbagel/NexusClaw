@@ -77,7 +77,13 @@ export function renderSystem(level: "info" | "warn" | "error", text: string): st
 // ---------------------------------------------------------------------------
 
 export interface Sender {
-  send(chatId: string, text: string, replyMarkup?: InlineKeyboard): Promise<{ messageId: number }>;
+  /** `topicId` is forwarded as Telegram's `message_thread_id` for forum chats. */
+  send(
+    chatId: string,
+    text: string,
+    replyMarkup?: InlineKeyboard,
+    topicId?: string,
+  ): Promise<{ messageId: number }>;
   edit(chatId: string, messageId: number, text: string): Promise<void>;
 }
 
@@ -100,6 +106,8 @@ export class StreamingMessage {
     private readonly chatId: string,
     private readonly sender: Sender,
     private readonly minEditIntervalMs: number = MIN_EDIT_INTERVAL_MS,
+    /** Forum topic id for the first send; editMessageText does not need it. */
+    private readonly topicId?: string,
   ) {}
 
   pushDelta(delta: string): void {
@@ -119,7 +127,9 @@ export class StreamingMessage {
 
   private async sendFirst(): Promise<void> {
     try {
-      const { messageId } = await this.sender.send(this.chatId, this.buffer);
+      const { messageId } = await this.sender.send(
+        this.chatId, this.buffer, undefined, this.topicId,
+      );
       this.messageId = messageId;
       this.lastEditAt = Date.now();
     } catch {
@@ -206,6 +216,27 @@ export function parseInboundText(
   return { kind: "message", from, text };
 }
 
+/**
+ * Resolve `/cmd@botname args…` in group commands. Returns:
+ *   - the original text if not a command, or a command with no `@` mention
+ *   - the stripped text (`/cmd args…`) if the mention matches our bot
+ *   - null if the mention targets a different bot (caller should drop)
+ */
+export function stripBotMention(text: string, ourUsername?: string): string | null {
+  if (!text.startsWith("/")) return text;
+  const spaceIdx = text.indexOf(" ");
+  const nameSegment = spaceIdx > 0 ? text.slice(1, spaceIdx) : text.slice(1);
+  const tail        = spaceIdx > 0 ? text.slice(spaceIdx) : "";
+  const atIdx = nameSegment.indexOf("@");
+  if (atIdx < 0) return text;
+  const cmdName = nameSegment.slice(0, atIdx);
+  const target  = nameSegment.slice(atIdx + 1);
+  if (ourUsername && target.toLowerCase() === ourUsername.toLowerCase()) {
+    return `/${cmdName}${tail}`;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // TelegramAdapter
 // ---------------------------------------------------------------------------
@@ -289,20 +320,20 @@ export class TelegramAdapter implements PlatformAdapter {
       case "text": {
         let sm = this.streams.get(to.chatId);
         if (!sm) {
-          sm = new StreamingMessage(to.chatId, this.sender);
+          sm = new StreamingMessage(to.chatId, this.sender, undefined, to.topicId);
           this.streams.set(to.chatId, sm);
         }
         sm.pushDelta(out.delta);
         return;
       }
       case "tool_call":
-        await this.sender.send(to.chatId, renderToolCall(out.name, out.input));
+        await this.sender.send(to.chatId, renderToolCall(out.name, out.input), undefined, to.topicId);
         return;
       case "tool_result":
-        await this.sender.send(to.chatId, renderToolResult(out.name, out.result, out.ok));
+        await this.sender.send(to.chatId, renderToolResult(out.name, out.result, out.ok), undefined, to.topicId);
         return;
       case "system":
-        await this.sender.send(to.chatId, renderSystem(out.level, out.text));
+        await this.sender.send(to.chatId, renderSystem(out.level, out.text), undefined, to.topicId);
         return;
       case "turn_done": {
         const sm = this.streams.get(to.chatId);
@@ -321,13 +352,13 @@ export class TelegramAdapter implements PlatformAdapter {
       const kb = new InlineKeyboard()
         .text("Allow", `prompt:${id}:allow`)
         .text("Deny",  `prompt:${id}:deny`);
-      await this.sender.send(p.to.chatId, `⚠️ ${p.message}`, kb);
+      await this.sender.send(p.to.chatId, `⚠️ ${p.message}`, kb, p.to.topicId);
       return promise;
     }
     const { id, promise } = this.prompts.register("plan_approval");
     const kb = new InlineKeyboard();
     for (const c of p.choices) kb.row().text(c.label, `prompt:${id}:${c.id}`);
-    await this.sender.send(p.to.chatId, `📋 Plan:\n${truncate(p.planContent, MAX_PLAN_PREVIEW)}`, kb);
+    await this.sender.send(p.to.chatId, `📋 Plan:\n${truncate(p.planContent, MAX_PLAN_PREVIEW)}`, kb, p.to.topicId);
     return promise;
   }
 
@@ -337,9 +368,10 @@ export class TelegramAdapter implements PlatformAdapter {
 
   private defaultSender(): Sender {
     return {
-      send: async (chatId, text, replyMarkup) => {
+      send: async (chatId, text, replyMarkup, topicId) => {
         const m = await this.bot.api.sendMessage(chatId, text, {
           reply_markup: replyMarkup,
+          ...(topicId !== undefined ? { message_thread_id: Number(topicId) } : {}),
         });
         return { messageId: m.message_id };
       },
@@ -369,7 +401,7 @@ export class TelegramAdapter implements PlatformAdapter {
       }
     });
 
-    this.bot.on("message:text", (ctx) => {
+    this.bot.on("message", (ctx) => {
       if (!ctx.from || !ctx.chat) return;
 
       // Drop self-echoed messages defensively (e.g. multi-bot / forwarded).
@@ -378,6 +410,8 @@ export class TelegramAdapter implements PlatformAdapter {
       const space = classifyChat(ctx.chat, ctx.message);
       if (space.kind === "channel") return;
 
+      // Access checks run BEFORE we inspect message content. Unauthorized
+      // senders never trigger any media-specific processing.
       if (space.kind !== "dm") {
         const decision = checkGroupAccess(space, String(ctx.from.id), this.access);
         if (!decision.allowed) {
@@ -388,7 +422,6 @@ export class TelegramAdapter implements PlatformAdapter {
           return;
         }
       } else if (this.dm) {
-        // DM policy enforcement. Absent provider = fall through (legacy).
         const userId = String(ctx.from.id);
         const decision = checkDmAccess(userId, {
           policy: this.dm.policy,
@@ -413,15 +446,34 @@ export class TelegramAdapter implements PlatformAdapter {
         }
       }
 
+      // Access granted. Now branch on content. Media is dropped — agent
+      // core does not yet handle non-text.
+      const text = ctx.message.text;
+      if (text === undefined) {
+        console.debug(
+          `telegram: dropping non-text message from ${ctx.from.id} — media unsupported`,
+        );
+        return;
+      }
+
       if (!this.handler) return;
+
+      // Resolve /cmd@botname in groups before parsing.
+      const cleaned = stripBotMention(text, ctx.me.username);
+      if (cleaned === null) return;  // command was addressed to another bot
 
       const from: RemoteIdentity = {
         platform: "telegram",
         userId: String(ctx.from.id),
         chatId: String(ctx.chat.id),
+        ...(space.kind === "forum" ? { topicId: space.topicId } : {}),
       };
-      this.handler(parseInboundText(ctx.message.text, from));
+      this.handler(parseInboundText(cleaned, from));
     });
+
+    // Subscribe to edits so the wire delivers them — middleware then logs
+    // and dedups them. By design we do not forward edits to the agent.
+    this.bot.on("edited_message", () => {});
 
     this.bot.on("callback_query:data", async (ctx) => {
       const parsed = parsePromptCallback(ctx.callbackQuery.data);

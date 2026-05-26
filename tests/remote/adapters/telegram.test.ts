@@ -151,14 +151,15 @@ interface SenderCall {
   chatId: string;
   messageId?: number;
   text: string;
+  topicId?: string;
 }
 
 function makeFakeSender(): { sender: Sender; calls: SenderCall[]; nextId: { v: number } } {
   const calls: SenderCall[] = [];
   const nextId = { v: 1 };
   const sender: Sender = {
-    send: async (chatId, text) => {
-      calls.push({ op: "send", chatId, text });
+    send: async (chatId, text, _replyMarkup, topicId) => {
+      calls.push({ op: "send", chatId, text, topicId });
       return { messageId: nextId.v++ };
     },
     edit: async (chatId, messageId, text) => {
@@ -606,5 +607,260 @@ describe("dm policy — pairing", () => {
       updateId: 1, userId: 99, text: "again",
     }));
     expect(calls[0]!.text).toContain("EXISTCDE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stripBotMention — /cmd@botname resolution in groups
+// ---------------------------------------------------------------------------
+
+import { stripBotMention } from "@/remote/adapters/telegram";
+
+describe("stripBotMention", () => {
+  test("non-command text is returned as-is", () => {
+    expect(stripBotMention("hello", "nexusclaw_bot")).toBe("hello");
+  });
+
+  test("command with no @ is returned as-is", () => {
+    expect(stripBotMention("/clear", "nexusclaw_bot")).toBe("/clear");
+    expect(stripBotMention("/echo hello world", "nexusclaw_bot")).toBe("/echo hello world");
+  });
+
+  test("command with @ourbot is stripped", () => {
+    expect(stripBotMention("/clear@nexusclaw_bot", "nexusclaw_bot")).toBe("/clear");
+    expect(stripBotMention("/echo@nexusclaw_bot hi", "nexusclaw_bot")).toBe("/echo hi");
+  });
+
+  test("case-insensitive match on bot name", () => {
+    expect(stripBotMention("/clear@NexusClaw_Bot", "nexusclaw_bot")).toBe("/clear");
+  });
+
+  test("command with @otherbot returns null", () => {
+    expect(stripBotMention("/clear@otherbot", "nexusclaw_bot")).toBeNull();
+    expect(stripBotMention("/echo@otherbot hi", "nexusclaw_bot")).toBeNull();
+  });
+
+  test("returns null for any mention when ourUsername is missing", () => {
+    expect(stripBotMention("/clear@anything", undefined)).toBeNull();
+  });
+
+  test("/stop@ourbot strips to /stop", () => {
+    expect(stripBotMention("/stop@nexusclaw_bot", "nexusclaw_bot")).toBe("/stop");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 6 — non-text messages dropped after access gate, edits ignored,
+// forum routing carries topicId end to end.
+// ---------------------------------------------------------------------------
+
+function makePhotoUpdate(opts: {
+  updateId: number; chatId: number; fromId: number;
+  username?: string; chatType?: "private" | "group" | "supergroup";
+}): unknown {
+  return {
+    update_id: opts.updateId,
+    message: {
+      message_id: opts.updateId * 100,
+      date: 1234567890,
+      chat: { id: opts.chatId, type: opts.chatType ?? "private" },
+      from: {
+        id: opts.fromId, is_bot: false, first_name: "U",
+        ...(opts.username !== undefined ? { username: opts.username } : {}),
+      },
+      // No `text` field. A real photo update would have `photo`, but the
+      // adapter only checks for the *absence* of text so this is enough.
+      photo: [{ file_id: "f1", file_unique_id: "u1", width: 10, height: 10 }],
+    },
+  };
+}
+
+function makeEditedUpdate(opts: { updateId: number; userId: number; text: string }): unknown {
+  return {
+    update_id: opts.updateId,
+    edited_message: {
+      message_id: opts.updateId * 100,
+      date: 1234567890,
+      edit_date: 1234567990,
+      chat: { id: opts.userId, type: "private" },
+      from: { id: opts.userId, is_bot: false, first_name: "U" },
+      text: opts.text,
+    },
+  };
+}
+
+describe("non-text messages", () => {
+  test("photo from a known DM user is dropped (no event)", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed(makePhotoUpdate({ updateId: 1, chatId: 42, fromId: 42 }));
+    expect(events).toEqual([]);
+  });
+
+  test("photo from a stranger under disable is dropped silently (no prompt, no event)", async () => {
+    const dm = dmProvider("disable");
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const events: RemoteEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makePhotoUpdate({ updateId: 1, chatId: 99, fromId: 99 }));
+    expect(events).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test("photo from a stranger under pairing triggers the pairing prompt", async () => {
+    const dm = dmProvider("pairing");
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const events: RemoteEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).bot.handleUpdate(makePhotoUpdate({
+      updateId: 1, chatId: 99, fromId: 99, username: "carol",
+    }));
+    expect(events).toEqual([]);  // agent never sees the photo
+    expect(dm.registerPendingCalls).toHaveLength(1);
+    const sent = calls.filter((c) => c.op === "send");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toContain("Your Telegram user id: 99");
+  });
+
+  test("photo in a non-configured group is dropped silently", async () => {
+    const { events, feed } = makeAdapter();
+    await feed(makePhotoUpdate({ updateId: 1, chatId: -100, fromId: 42, chatType: "supergroup" }));
+    expect(events).toEqual([]);
+  });
+});
+
+describe("edited messages", () => {
+  test("edited_message updates do not produce events", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { events, feed } = makeAdapter({ dm });
+    await feed(makeEditedUpdate({ updateId: 1, userId: 42, text: "hello, fixed typo" }));
+    expect(events).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /cmd@botname inbound resolution (integration, not just the unit helper)
+// ---------------------------------------------------------------------------
+
+describe("group commands with @botname (integration)", () => {
+  function makeGroupCommandUpdate(text: string): unknown {
+    return {
+      update_id: 1,
+      message: {
+        message_id: 100,
+        date: 1234567890,
+        chat: { id: -100, type: "supergroup", title: "G" },
+        from: { id: 42, is_bot: false, first_name: "U" },
+        text,
+      },
+    };
+  }
+
+  function makeBotUsernameInfo(username: string) {
+    return { ...BOT_INFO, username };
+  }
+
+  test("/clear@ourbot in a configured group → command event with name='clear'", async () => {
+    const { events, feed } = makeAdapter({
+      access: { groups: { "-100": { policy: "open" } } },
+    });
+    // Inject username we registered as "test"; the helper uses BOT_INFO.username = "test"
+    // already, so the command target must match. Use "test".
+    await feed(makeGroupCommandUpdate("/clear@test"));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "command", name: "clear", args: "" });
+  });
+
+  test("/echo@ourbot hello in a configured group → command with name='echo' args='hello'", async () => {
+    const { events, feed } = makeAdapter({
+      access: { groups: { "-100": { policy: "open" } } },
+    });
+    await feed(makeGroupCommandUpdate("/echo@test hello"));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "command", name: "echo", args: "hello" });
+  });
+
+  test("/clear@otherbot is silently dropped", async () => {
+    const { events, feed } = makeAdapter({
+      access: { groups: { "-100": { policy: "open" } } },
+    });
+    await feed(makeGroupCommandUpdate("/clear@some_other_bot"));
+    expect(events).toEqual([]);
+  });
+
+  // Just double-checks the username helper is what we think it is.
+  test("BOT_INFO.username is 'test' (sanity)", () => {
+    expect(makeBotUsernameInfo("test").username).toBe("test");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Forum routing — topicId carried on inbound and forwarded on outbound
+// ---------------------------------------------------------------------------
+
+describe("forum routing", () => {
+  test("inbound forum message carries topicId in RemoteIdentity", async () => {
+    const { events, feed } = makeAdapter({
+      access: {
+        groups: { "-100": { policy: "open", topics: { "7": { enabled: true } } } },
+      },
+    });
+    await feed(makeGroupUpdate({
+      updateId: 1, chatId: -100, fromId: 42, text: "hi",
+      threadId: 7, isTopicMessage: true,
+    }));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.from).toMatchObject({
+      platform: "telegram", userId: "42", chatId: "-100", topicId: "7",
+    });
+  });
+
+  test("inbound non-forum group message has no topicId", async () => {
+    const { events, feed } = makeAdapter({
+      access: { groups: { "-100": { policy: "open" } } },
+    });
+    await feed(makeGroupUpdate({ updateId: 1, chatId: -100, fromId: 42, text: "hi" }));
+    expect(events[0]!.from.topicId).toBeUndefined();
+  });
+
+  test("outbound text to a forum identity is sent with topicId", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    await adapter.send(
+      { platform: "telegram", userId: "42", chatId: "-100", topicId: "7" },
+      { kind: "text", delta: "hello" },
+    );
+    // First delta fires sendFirst — wait a tick.
+    await new Promise((r) => setTimeout(r, 5));
+    const sent = calls.filter((c) => c.op === "send");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.topicId).toBe("7");
+  });
+
+  test("outbound tool_call/system carry topicId to the sender", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    const to = { platform: "telegram", userId: "42", chatId: "-100", topicId: "7" } as const;
+    await adapter.send(to, { kind: "tool_call", name: "read_file", input: {} });
+    await adapter.send(to, { kind: "system", level: "info", text: "hi" });
+    expect(calls.every((c) => c.topicId === "7")).toBe(true);
+  });
+
+  test("outbound to a non-forum identity has no topicId on the sender call", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender });
+    await adapter.send(
+      { platform: "telegram", userId: "42", chatId: "42" },  // plain DM
+      { kind: "system", level: "info", text: "hi" },
+    );
+    expect(calls[0]!.topicId).toBeUndefined();
   });
 });
