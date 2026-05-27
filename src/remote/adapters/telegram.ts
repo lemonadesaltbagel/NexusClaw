@@ -31,6 +31,11 @@ import {
   formatPairingPrompt,
   type DmPolicyKind,
 } from "@/remote/adapters/telegram-dm";
+import {
+  FloodGuard,
+  type FloodLimits,
+  type SyntheticMessage,
+} from "@/remote/adapters/telegram-flood";
 
 // ---------------------------------------------------------------------------
 // Limits + tunables
@@ -279,6 +284,11 @@ export interface TelegramAdapterOptions {
   access?: AccessSettings;
   /** DM access policy + state. Absent means DMs fall through to the gateway. */
   dm?: DmAccessProvider;
+  /**
+   * Flood-guard tuning. `false` disables the guard entirely (messages flow
+   * straight through, useful for tests). Omitted = enabled with defaults.
+   */
+  flood?: Partial<FloodLimits> | false;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -292,6 +302,7 @@ export class TelegramAdapter implements PlatformAdapter {
   private verbose: boolean;
   private access: AccessSettings;
   private dm: DmAccessProvider | null;
+  private flood: FloodGuard | null;
   private pendingUpdateIds = new Set<number>();
   private sequentializer = new Sequentializer();
 
@@ -301,6 +312,12 @@ export class TelegramAdapter implements PlatformAdapter {
     this.verbose = opts.verbose ?? false;
     this.access = opts.access ?? {};
     this.dm = opts.dm ?? null;
+    this.flood = opts.flood === false
+      ? null
+      : new FloodGuard(
+          (msg) => this.dispatchSynthetic(msg),
+          { limits: opts.flood ?? {} },
+        );
     this.wireHandlers();
   }
 
@@ -321,6 +338,7 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   async stop(): Promise<void> {
+    this.flood?.stop();
     await this.bot.stop();
   }
 
@@ -352,6 +370,8 @@ export class TelegramAdapter implements PlatformAdapter {
           await sm.finalize();
           this.streams.delete(key);
         }
+        // Tell the FloodGuard a slot has opened for this sender.
+        this.flood?.notifyTurnDone(Number(to.userId));
         return;
       }
     }
@@ -376,6 +396,27 @@ export class TelegramAdapter implements PlatformAdapter {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
+
+  /**
+   * Called by the FloodGuard's onFlush — converts the synthetic message
+   * (already composed across the debounce window) into a RemoteEvent and
+   * hands it to the registered handler.
+   */
+  private dispatchSynthetic(msg: SyntheticMessage): void {
+    if (!this.handler) return;
+    const from: RemoteIdentity = {
+      platform: "telegram",
+      userId:   String(msg.fromUser.id),
+      chatId:   msg.chatId,
+      ...(msg.topicId !== undefined ? { topicId: msg.topicId } : {}),
+    };
+    console.debug(
+      `telegram: accept from ${from.userId} in chat ${from.chatId}` +
+      (from.topicId ? `/${from.topicId}` : "") +
+      (msg.count > 1 ? ` (${msg.count} merged)` : ""),
+    );
+    this.handler(parseInboundText(msg.text, from));
+  }
 
   private defaultSender(): Sender {
     return {
@@ -468,8 +509,6 @@ export class TelegramAdapter implements PlatformAdapter {
         return;
       }
 
-      if (!this.handler) return;
-
       // Resolve /cmd@botname in groups before parsing.
       const cleaned = stripBotMention(text, ctx.me.username);
       if (cleaned === null) return;  // command was addressed to another bot
@@ -478,6 +517,30 @@ export class TelegramAdapter implements PlatformAdapter {
         return;
       }
 
+      // Flood-guard path: try to accept; on success the FloodGuard will fire
+      // its onFlush callback (dispatchSynthetic) after the debounce window.
+      // On rejection it has already logged the abuse line.
+      if (this.flood) {
+        const decision = this.flood.tryAccept({
+          text:      cleaned,
+          chatId:    String(ctx.chat.id),
+          topicId:   space.kind === "forum" ? space.topicId : undefined,
+          fromUser:  {
+            id: ctx.from.id,
+            username:   ctx.from.username,
+            first_name: ctx.from.first_name,
+          },
+          date:      ctx.message.date,
+          messageId: ctx.message.message_id,
+        });
+        if (!decision.ok) {
+          console.debug(`telegram: flood-rejected ${ctx.from.id} (${decision.code})`);
+        }
+        return;
+      }
+
+      // No flood guard — direct dispatch (used by tests with flood: false).
+      if (!this.handler) return;
       const from: RemoteIdentity = {
         platform: "telegram",
         userId: String(ctx.from.id),

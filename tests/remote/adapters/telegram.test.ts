@@ -258,7 +258,10 @@ function makeAdapter(opts: Partial<ConstructorParameters<typeof TelegramAdapter>
   feed: (update: unknown) => Promise<void>;
 } {
   const { sender } = makeFakeSender();
-  const adapter = new TelegramAdapter({ token: "test-token", sender, ...opts });
+  // Disable flood guard by default in tests so existing assertions stay
+  // deterministic (no debounce delay, no rate window). Tests that exercise
+  // the flood guard pass `flood: { ... }` explicitly.
+  const adapter = new TelegramAdapter({ token: "test-token", sender, flood: false, ...opts });
   const events: RemoteEvent[] = [];
   adapter.onEvent((e) => events.push(e));
   // Inject botInfo so handleUpdate doesn't try to call getMe over the network.
@@ -573,7 +576,7 @@ describe("dm policy — pairing", () => {
   test("stranger → no agent dispatch; registerPending called; pairing prompt sent", async () => {
     const dm = dmProvider("pairing");
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     const events: RemoteEvent[] = [];
     adapter.onEvent((e) => events.push(e));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -599,7 +602,7 @@ describe("dm policy — pairing", () => {
     const dm = dmProvider("pairing", { pending });
     pending.set("99", "EXISTCDE");  // pretend a code already exists for this user
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (adapter as any).bot.botInfo = BOT_INFO;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -700,7 +703,7 @@ describe("non-text messages", () => {
   test("photo from a stranger under disable is dropped silently (no prompt, no event)", async () => {
     const dm = dmProvider("disable");
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     const events: RemoteEvent[] = [];
     adapter.onEvent((e) => events.push(e));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -714,7 +717,7 @@ describe("non-text messages", () => {
   test("photo from a stranger under pairing triggers the pairing prompt", async () => {
     const dm = dmProvider("pairing");
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     const events: RemoteEvent[] = [];
     adapter.onEvent((e) => events.push(e));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -833,7 +836,7 @@ describe("forum routing", () => {
 
   test("outbound text to a forum identity is sent with topicId", async () => {
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     await adapter.send(
       { platform: "telegram", userId: "42", chatId: "-100", topicId: "7" },
       { kind: "text", delta: "hello" },
@@ -847,7 +850,7 @@ describe("forum routing", () => {
 
   test("outbound tool_call/system carry topicId to the sender", async () => {
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     const to = { platform: "telegram", userId: "42", chatId: "-100", topicId: "7" } as const;
     await adapter.send(to, { kind: "tool_call", name: "read_file", input: {} });
     await adapter.send(to, { kind: "system", level: "info", text: "hi" });
@@ -856,7 +859,7 @@ describe("forum routing", () => {
 
   test("outbound to a non-forum identity has no topicId on the sender call", async () => {
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     await adapter.send(
       { platform: "telegram", userId: "42", chatId: "42" },  // plain DM
       { kind: "system", level: "info", text: "hi" },
@@ -975,7 +978,7 @@ describe("callback_query access gate", () => {
     // Set up an adapter with a pending prompt, then deliver a callback
     // from an unauthorized group.
     const { sender } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (adapter as any).bot.botInfo = BOT_INFO;
     // Register a pending prompt so we can detect resolution.
@@ -996,7 +999,7 @@ describe("callback_query access gate", () => {
   test("callback in a configured open group is resolved", async () => {
     const { sender } = makeFakeSender();
     const adapter = new TelegramAdapter({
-      token: "t", sender,
+      token: "t", sender, flood: false,
       access: { groups: { "-100": { policy: "open" } } },
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1015,7 +1018,7 @@ describe("callback_query access gate", () => {
   test("DM callback from an unknown user is dropped", async () => {
     const dm = dmProvider("allowlist", { known: ["42"] });
     const { sender } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (adapter as any).bot.botInfo = BOT_INFO;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1032,7 +1035,7 @@ describe("callback_query access gate", () => {
   test("DM callback from a known user resolves the prompt", async () => {
     const dm = dmProvider("allowlist", { known: ["42"] });
     const { sender } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender, dm });
+    const adapter = new TelegramAdapter({ token: "t", sender, dm, flood: false });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (adapter as any).bot.botInfo = BOT_INFO;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1049,7 +1052,7 @@ describe("callback_query access gate", () => {
 describe("multi-user streaming isolation", () => {
   test("two users in the same chat get separate streaming messages", async () => {
     const { sender, calls } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     const idA = { platform: "telegram", userId: "1", chatId: "-100" } as const;
     const idB = { platform: "telegram", userId: "2", chatId: "-100" } as const;
     await adapter.send(idA, { kind: "text", delta: "from A" });
@@ -1062,7 +1065,7 @@ describe("multi-user streaming isolation", () => {
 
   test("turn_done for one user leaves the other user's stream intact", async () => {
     const { sender } = makeFakeSender();
-    const adapter = new TelegramAdapter({ token: "t", sender });
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
     const idA = { platform: "telegram", userId: "1", chatId: "-100" } as const;
     const idB = { platform: "telegram", userId: "2", chatId: "-100" } as const;
     await adapter.send(idA, { kind: "text", delta: "a1" });
@@ -1090,5 +1093,83 @@ describe("my_chat_member subscription", () => {
     });
     // No RemoteEvent should be emitted.
     expect(events).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 7 — flood guard end-to-end via the adapter
+// ---------------------------------------------------------------------------
+
+describe("flood guard — integration", () => {
+  test("two rapid DMs from the same user coalesce into one event", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({
+      token: "t", sender, dm,
+      flood: { debounceMs: 30 },  // short debounce for the test
+    });
+    const events: RemoteEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    await bot.handleUpdate(makeTextUpdate(1, "hello"));
+    await bot.handleUpdate(makeTextUpdate(2, "world"));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "message", text: "hello\nworld" });
+    await adapter.stop();
+  });
+
+  test("rate-limit rejection silently drops further messages", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({
+      token: "t", sender, dm,
+      flood: { debounceMs: 60_000, ratePerMin: 1 },  // long debounce, tiny rate
+    });
+    const events: RemoteEvent[] = [];
+    adapter.onEvent((e) => events.push(e));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    await bot.handleUpdate(makeTextUpdate(1, "first"));  // ok (still in debounce)
+    await bot.handleUpdate(makeTextUpdate(2, "second")); // 429 (rate=1)
+    await bot.handleUpdate(makeTextUpdate(3, "third"));  // 429
+    // Nothing flushes because debounce is 60s. The point is: events empty (no
+    // dispatch), but no exceptions.
+    expect(events).toEqual([]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const guard = (adapter as any).flood;
+    expect(guard.abuseCountFor(42)).toBe(2);
+    await adapter.stop();
+  });
+
+  test("turn_done received by adapter frees a pending slot for the sender", async () => {
+    const dm = dmProvider("open", { known: ["42"] });
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({
+      token: "t", sender, dm,
+      flood: { debounceMs: 20, maxPending: 1 },
+    });
+    adapter.onEvent(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    await bot.handleUpdate(makeTextUpdate(1, "hello"));
+    await new Promise((r) => setTimeout(r, 40));   // let debounce flush
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const guard = (adapter as any).flood;
+    expect(guard.pendingFor(42)).toBe(1);
+    // Adapter dispatches turn_done back through send() — simulate it.
+    await adapter.send(
+      { platform: "telegram", userId: "42", chatId: "42" },
+      { kind: "turn_done" },
+    );
+    expect(guard.pendingFor(42)).toBe(0);
+    await adapter.stop();
   });
 });
