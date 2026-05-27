@@ -86,10 +86,35 @@ const pairingApproveCommand = new Command("approve")
   });
 
 // ---------------------------------------------------------------------------
+// `pairing deny <platform> <code>` — drop a pending request without
+// granting access. No userMap write.
+// ---------------------------------------------------------------------------
+
+const pairingDenyCommand = new Command("deny")
+  .description("Reject a pending pairing request by its code (no userMap entry)")
+  .argument("<platform>", "Platform name, e.g. 'telegram'")
+  .argument("<code>", "Pairing code from the bot's message to the user")
+  .option("--pairing-path <path>", "Path to pairing.json", DEFAULT_PAIRING_PATH)
+  .action((platform: string, code: string, opts) => {
+    if (platform !== "telegram") {
+      console.error(`Unknown platform: ${platform}`);
+      process.exit(1);
+    }
+    const match = findByCode(code, opts.pairingPath);
+    if (!match) {
+      console.error(`No pending request with code ${code}.`);
+      process.exit(1);
+    }
+    removePending("telegram", match.userId, opts.pairingPath);
+    console.log(`Denied ${chalk.bold(code)}: telegram user ${match.userId} dropped.`);
+  });
+
+// ---------------------------------------------------------------------------
 // Parent command
 // ---------------------------------------------------------------------------
 
 export const pairingCommand = new Command("pairing")
   .description("Manage pending pairing requests")
   .addCommand(pairingListCommand)
-  .addCommand(pairingApproveCommand);
+  .addCommand(pairingApproveCommand)
+  .addCommand(pairingDenyCommand);

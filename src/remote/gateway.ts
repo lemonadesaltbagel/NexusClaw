@@ -134,7 +134,7 @@ export class Gateway {
 
   private async dispatch(binding: UserBinding, e: RemoteEvent): Promise<void> {
     if (e.kind === "message") {
-      await binding.agent.chat(e.text);
+      await binding.agent.chat(e.text, e.signal ? { signal: e.signal } : undefined);
       return;
     }
     if (e.kind === "command") {

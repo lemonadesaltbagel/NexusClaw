@@ -36,7 +36,17 @@ export function identityKey(id: RemoteIdentity): RemoteIdentityKey {
 // ---------------------------------------------------------------------------
 
 export type RemoteEvent =
-  | { kind: "message";   from: RemoteIdentity; text: string }
+  | {
+      kind: "message";
+      from: RemoteIdentity;
+      text: string;
+      /**
+       * Optional per-turn abort signal. When set, the gateway forwards it
+       * to `agent.chat`. The adapter sets this when it owns a per-turn
+       * AbortController (e.g. Telegram's FloodGuard janitor).
+       */
+      signal?: AbortSignal;
+    }
   | { kind: "command";   from: RemoteIdentity; name: string; args: string }
   | { kind: "interrupt"; from: RemoteIdentity }
   | { kind: "callback";  from: RemoteIdentity; id: string; value: string };

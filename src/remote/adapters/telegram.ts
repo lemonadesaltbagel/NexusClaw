@@ -305,6 +305,12 @@ export class TelegramAdapter implements PlatformAdapter {
   private flood: FloodGuard | null;
   private pendingUpdateIds = new Set<number>();
   private sequentializer = new Sequentializer();
+  /**
+   * Per-sender FIFO of resolve callbacks. Each FloodGuard onFlush pushes one;
+   * each outbound `turn_done` pops the oldest and calls it, which lets the
+   * FloodGuard's dispatchOne unwind and release its pending slot.
+   */
+  private awaitingTurnDone = new Map<number, Array<() => void>>();
 
   constructor(opts: TelegramAdapterOptions) {
     this.bot = new Bot(opts.token);
@@ -315,7 +321,7 @@ export class TelegramAdapter implements PlatformAdapter {
     this.flood = opts.flood === false
       ? null
       : new FloodGuard(
-          (msg) => this.dispatchSynthetic(msg),
+          (msg, signal) => this.dispatchSynthetic(msg, signal),
           { limits: opts.flood ?? {} },
         );
     this.wireHandlers();
@@ -370,8 +376,17 @@ export class TelegramAdapter implements PlatformAdapter {
           await sm.finalize();
           this.streams.delete(key);
         }
-        // Tell the FloodGuard a slot has opened for this sender.
-        this.flood?.notifyTurnDone(Number(to.userId));
+        // Resolve the oldest awaiting onFlush for this user. That unwinds
+        // the FloodGuard's dispatchOne; its finally then releases the slot.
+        // We log only — release ownership lives in the finally, not here.
+        const userId = Number(to.userId);
+        const queue = this.awaitingTurnDone.get(userId);
+        if (queue && queue.length > 0) {
+          const resolve = queue.shift()!;
+          if (queue.length === 0) this.awaitingTurnDone.delete(userId);
+          resolve();
+        }
+        this.flood?.logTurnDone(userId);
         return;
       }
     }
@@ -398,12 +413,17 @@ export class TelegramAdapter implements PlatformAdapter {
   // -------------------------------------------------------------------------
 
   /**
-   * Called by the FloodGuard's onFlush — converts the synthetic message
-   * (already composed across the debounce window) into a RemoteEvent and
-   * hands it to the registered handler.
+   * Called by the FloodGuard's onFlush. Returns a promise that resolves
+   * when the gateway fires `turn_done` for this sender (or rejects if the
+   * janitor aborts the per-turn signal). The FloodGuard's dispatchOne
+   * `finally` releases the pending slot on either outcome.
    */
-  private dispatchSynthetic(msg: SyntheticMessage): void {
+  private async dispatchSynthetic(
+    msg: SyntheticMessage,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!this.handler) return;
+
     const from: RemoteIdentity = {
       platform: "telegram",
       userId:   String(msg.fromUser.id),
@@ -415,7 +435,41 @@ export class TelegramAdapter implements PlatformAdapter {
       (from.topicId ? `/${from.topicId}` : "") +
       (msg.count > 1 ? ` (${msg.count} merged)` : ""),
     );
-    this.handler(parseInboundText(msg.text, from));
+
+    const userId = msg.fromUser.id;
+    let resolveTurnDone!: () => void;
+    let rejectTurnDone!: (err: Error) => void;
+    const turnDone = new Promise<void>((res, rej) => {
+      resolveTurnDone = res;
+      rejectTurnDone = rej;
+    });
+    const queue = this.awaitingTurnDone.get(userId) ?? [];
+    queue.push(resolveTurnDone);
+    this.awaitingTurnDone.set(userId, queue);
+
+    const onAbort = (): void => {
+      // Pull our resolve out of the queue so a later turn_done doesn't fire
+      // a stale callback.
+      const q = this.awaitingTurnDone.get(userId);
+      if (q) {
+        const i = q.indexOf(resolveTurnDone);
+        if (i >= 0) q.splice(i, 1);
+        if (q.length === 0) this.awaitingTurnDone.delete(userId);
+      }
+      rejectTurnDone(new Error("aborted"));
+    };
+    signal.addEventListener("abort", onAbort);
+
+    const event = parseInboundText(msg.text, from);
+    // Forward the per-turn signal so the gateway can pass it to agent.chat.
+    if (event.kind === "message") event.signal = signal;
+    this.handler(event);
+
+    try {
+      await turnDone;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private defaultSender(): Sender {
@@ -485,6 +539,12 @@ export class TelegramAdapter implements PlatformAdapter {
           return;
         }
         if (decision.kind === "pair_prompt") {
+          // Pairing prompts respect the same per-sender rate budget as the
+          // regular inbound — a stranger can't infinite-spam pairing replies.
+          if (this.flood && !this.flood.tryRateOnly(Number(userId)).ok) {
+            console.debug(`telegram: rate-limited pairing prompt for ${userId}`);
+            return;
+          }
           const code = this.dm.registerPending({
             userId,
             username:  ctx.from.username,
@@ -564,8 +624,10 @@ export class TelegramAdapter implements PlatformAdapter {
     this.bot.on("my_chat_member", (ctx) => {
       const chat = ctx.chat;
       const status = ctx.myChatMember.new_chat_member.status;
+      const actor = ctx.from?.id ?? "?";
       console.error(
-        `telegram: my_chat_member — chat ${chat.id} (${chat.type}) → ${status}`,
+        `telegram: my_chat_member — chat ${chat.id} (${chat.type}) → ${status} ` +
+        `(by user ${actor})`,
       );
     });
 

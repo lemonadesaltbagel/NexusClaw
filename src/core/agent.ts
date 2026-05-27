@@ -426,11 +426,23 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
   }
 
   /** High-level entry point: runs one full turn with abort support. */
-  async chat(userMessage: string): Promise<QueryResult> {
+  async chat(userMessage: string, opts?: { signal?: AbortSignal }): Promise<QueryResult> {
     this.abortController = new AbortController();
+    let onExternalAbort: (() => void) | undefined;
+    if (opts?.signal) {
+      if (opts.signal.aborted) {
+        this.abortController.abort();
+      } else {
+        onExternalAbort = () => this.abortController?.abort();
+        opts.signal.addEventListener("abort", onExternalAbort);
+      }
+    }
     try {
       return await this.runTurn(userMessage);
     } finally {
+      if (opts?.signal && onExternalAbort) {
+        opts.signal.removeEventListener("abort", onExternalAbort);
+      }
       this.abortController = null;
       if (!this.isSubAgent) {
         this.autoSave();

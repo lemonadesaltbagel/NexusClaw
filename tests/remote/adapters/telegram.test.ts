@@ -1169,6 +1169,9 @@ describe("flood guard — integration", () => {
       { platform: "telegram", userId: "42", chatId: "42" },
       { kind: "turn_done" },
     );
+    // Release runs through a microtask chain: resolve → onFlush returns →
+    // dispatchOne's finally fires → pending decrement. Let it settle.
+    await new Promise((r) => setTimeout(r, 10));
     expect(guard.pendingFor(42)).toBe(0);
     await adapter.stop();
   });
