@@ -166,4 +166,15 @@ export interface PlatformAdapter {
 
   /** Ask the user something and wait for their reply. */
   prompt(p: RemotePrompt): Promise<RemotePromptReply>;
+
+  /**
+   * Send a platform-neutral payload. The adapter converts the markdown
+   * `text` to its native format, denormalizes `channelData` into wire-level
+   * fields, and dispatches one message to the platform.
+   *
+   * Returns the platform's message id when one is produced, or undefined
+   * when not applicable. The caller (router) can hold this id to support
+   * later edits / streaming.
+   */
+  sendPayload(target: OutboundTarget, payload: OutboundPayload): Promise<{ messageId?: number }>;
 }

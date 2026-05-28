@@ -40,6 +40,11 @@ class FakeAdapter implements PlatformAdapter {
     return r;
   }
 
+  async sendPayload(): Promise<{ messageId?: number }> {
+    // Not exercised by Gateway tests.
+    return {};
+  }
+
   /** Test helper — push an event into the gateway. */
   fire(e: RemoteEvent): void {
     if (!this.handler) throw new Error("FakeAdapter has no handler yet");

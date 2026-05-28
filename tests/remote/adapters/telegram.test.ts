@@ -1176,3 +1176,268 @@ describe("flood guard — integration", () => {
     await adapter.stop();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Stage 9 — sendPayload / threadId parsing / interactive keyboard
+// ---------------------------------------------------------------------------
+
+import {
+  parseTelegramThread,
+  buildInteractiveKeyboard,
+} from "@/remote/adapters/telegram";
+
+describe("parseTelegramThread", () => {
+  test("extracts numeric topic from <chatId>:topic:<n>", () => {
+    expect(parseTelegramThread("-1001234567890:topic:42")).toBe(42);
+  });
+  test("returns undefined for undefined input", () => {
+    expect(parseTelegramThread(undefined)).toBeUndefined();
+  });
+  test("returns undefined when the topic suffix is missing", () => {
+    expect(parseTelegramThread("-1001234567890")).toBeUndefined();
+  });
+  test("returns undefined for a non-numeric topic", () => {
+    expect(parseTelegramThread("-1001234567890:topic:abc")).toBeUndefined();
+  });
+});
+
+describe("buildInteractiveKeyboard", () => {
+  test("each option becomes a button with callback_data = value", () => {
+    const kb = buildInteractiveKeyboard([
+      { label: "Approve", value: "approve" },
+      { label: "Reject",  value: "reject" },
+    ]);
+    // grammY's InlineKeyboard exposes `inline_keyboard` as a 2D array.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    expect(rows[0]).toHaveLength(2);
+    expect(rows[0]![0]).toMatchObject({ text: "Approve", callback_data: "approve" });
+    expect(rows[0]![1]).toMatchObject({ text: "Reject",  callback_data: "reject" });
+  });
+});
+
+describe("TelegramAdapter.sendPayload", () => {
+  interface ApiCall {
+    chatId: string;
+    text:   string;
+    options: Record<string, unknown>;
+  }
+
+  function stubAdapter(): { adapter: TelegramAdapter; calls: ApiCall[] } {
+    const calls: ApiCall[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (chatId: string, text: string, options: Record<string, unknown>) => {
+      calls.push({ chatId, text, options });
+      return { message_id: 999 };
+    };
+    return { adapter, calls };
+  }
+
+  test("converts markdown to Telegram HTML and sets parse_mode=HTML", async () => {
+    const { adapter, calls } = stubAdapter();
+    const res = await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "Done! **README.md** is `up to date`." },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.text).toContain("<b>README.md</b>");
+    expect(calls[0]!.text).toContain("<code>up to date</code>");
+    expect(calls[0]!.options.parse_mode).toBe("HTML");
+    expect(res.messageId).toBe(999);
+  });
+
+  test("threadId encoded as <chat>:topic:<n> sets message_thread_id", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "-100", threadId: "-100:topic:7" },
+      { text: "hi" },
+    );
+    expect(calls[0]!.options.message_thread_id).toBe(7);
+  });
+
+  test("no threadId → no message_thread_id", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "hi" },
+    );
+    expect(calls[0]!.options.message_thread_id).toBeUndefined();
+  });
+
+  test("interactive prompt attaches reply_markup and appends prompt to body", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "Done!",
+        interactive: {
+          prompt: "Approve the change?",
+          options: [
+            { label: "Approve", value: "approve" },
+            { label: "Reject",  value: "reject"  },
+          ],
+        },
+      },
+    );
+    expect(calls[0]!.text).toContain("Done!");
+    expect(calls[0]!.text).toContain("Approve the change?");
+    expect(calls[0]!.options.reply_markup).toBeDefined();
+  });
+
+  test("channelData.telegram.quoteText becomes reply_parameters.quote", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "Done!",
+        channelData: { telegram: { quoteText: "I updated README.md" } },
+      },
+    );
+    const rp = calls[0]!.options.reply_parameters as { quote: string; quote_parse_mode: string };
+    expect(rp.quote).toBe("I updated README.md");
+    expect(rp.quote_parse_mode).toBe("HTML");
+  });
+
+  test("when no quoteText, reply_parameters is omitted", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "hi" },
+    );
+    expect(calls[0]!.options.reply_parameters).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 10 — chunked sends + retry safety net
+// ---------------------------------------------------------------------------
+
+describe("TelegramAdapter.sendPayload — chunked sends", () => {
+  interface ApiCall {
+    chatId: string;
+    text:   string;
+    options: Record<string, unknown>;
+  }
+
+  function multiChunkAdapter(): { adapter: TelegramAdapter; calls: ApiCall[] } {
+    const calls: ApiCall[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    let nextId = 1000;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (chatId: string, text: string, options: Record<string, unknown>) => {
+      calls.push({ chatId, text, options });
+      return { message_id: nextId++ };
+    };
+    return { adapter, calls };
+  }
+
+  test("long message produces multiple sendMessage calls, only first carries reply_markup", async () => {
+    const { adapter, calls } = multiChunkAdapter();
+    // Build a long markdown body that converts to ~9000 chars of HTML.
+    const body = "x".repeat(8500);
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: body,
+        interactive: { prompt: "?", options: [{ label: "Y", value: "y" }] },
+      },
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]!.options.reply_markup).toBeDefined();
+    for (let i = 1; i < calls.length; i++) {
+      expect(calls[i]!.options.reply_markup).toBeUndefined();
+    }
+  });
+
+  test("returns the first chunk's message id even when multiple chunks are sent", async () => {
+    const { adapter, calls } = multiChunkAdapter();
+    const body = "x".repeat(8500);
+    const res = await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: body },
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(res.messageId).toBe(1000);
+  });
+});
+
+describe("TelegramAdapter.sendPayload — retry safety net", () => {
+  interface ApiCall {
+    chatId: string;
+    text:   string;
+    options: Record<string, unknown>;
+  }
+
+  function adapterWithFailingFirstCall(fail: { description: string }): {
+    adapter: TelegramAdapter;
+    calls: ApiCall[];
+  } {
+    const calls: ApiCall[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    let firstAttempt = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (chatId: string, text: string, options: Record<string, unknown>) => {
+      calls.push({ chatId, text, options });
+      if (firstAttempt) {
+        firstAttempt = false;
+        const err = new Error(fail.description) as Error & { description: string };
+        err.description = fail.description;
+        throw err;
+      }
+      return { message_id: 1234 };
+    };
+    return { adapter, calls };
+  }
+
+  test("parse error → retry with plain text and no parse_mode", async () => {
+    const { adapter, calls } = adapterWithFailingFirstCall({
+      description: "Bad Request: can't parse entities: …",
+    });
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "Hello **world**" },
+    );
+    expect(calls).toHaveLength(2);
+    // First call: HTML body with parse_mode.
+    expect(calls[0]!.text).toContain("<b>world</b>");
+    expect(calls[0]!.options.parse_mode).toBe("HTML");
+    // Retry: plain text body, no parse_mode.
+    expect(calls[1]!.text).toBe("Hello world");
+    expect(calls[1]!.options.parse_mode).toBeUndefined();
+  });
+
+  test("thread-not-found → retry without message_thread_id", async () => {
+    const { adapter, calls } = adapterWithFailingFirstCall({
+      description: "Bad Request: message thread not found",
+    });
+    await adapter.sendPayload(
+      { channel: "telegram", to: "-100", threadId: "-100:topic:7" },
+      { text: "hi" },
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.options.message_thread_id).toBe(7);
+    expect(calls[1]!.options.message_thread_id).toBeUndefined();
+    // Retry still uses HTML body + parse_mode.
+    expect(calls[1]!.options.parse_mode).toBe("HTML");
+  });
+
+  test("other errors are rethrown after no retry", async () => {
+    const { adapter, calls } = adapterWithFailingFirstCall({
+      description: "Bad Request: chat not found",
+    });
+    await expect(
+      adapter.sendPayload({ channel: "telegram", to: "42" }, { text: "hi" }),
+    ).rejects.toThrow(/chat not found/);
+    expect(calls).toHaveLength(1);
+  });
+});

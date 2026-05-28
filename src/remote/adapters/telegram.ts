@@ -11,6 +11,8 @@
 
 import { Bot, InlineKeyboard } from "grammy";
 import type {
+  OutboundPayload,
+  OutboundTarget,
   PlatformAdapter,
   RemoteEvent,
   RemoteIdentity,
@@ -18,6 +20,11 @@ import type {
   RemotePrompt,
   RemotePromptReply,
 } from "@/remote/types";
+import {
+  markdownToTelegramHtml,
+  chunkHtmlMessage,
+  type OutboundChunk,
+} from "@/remote/adapters/telegram-html";
 import { Sequentializer } from "@/remote/sequentializer";
 import { verboseLogUpdate } from "@/remote/adapters/telegram-verbose";
 import {
@@ -251,6 +258,30 @@ export function stripBotMention(text: string, ourUsername?: string): string | nu
   return null;
 }
 
+/**
+ * Extract Telegram's `message_thread_id` from an OutboundTarget.threadId
+ * encoded as `"<chatId>:topic:<topicId>"`. Returns undefined when threadId
+ * is absent or doesn't match the expected shape.
+ */
+export function parseTelegramThread(threadId: string | undefined): number | undefined {
+  if (!threadId) return undefined;
+  const m = threadId.match(/:topic:(\d+)$/);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * Build a grammY InlineKeyboard from an OutboundInteractive's options.
+ * Each option is one button; `value` becomes the button's callback_data.
+ * Buttons lay out in a single row for now.
+ */
+export function buildInteractiveKeyboard(
+  options: ReadonlyArray<{ label: string; value: string }>,
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const opt of options) kb.text(opt.label, opt.value);
+  return kb;
+}
+
 // ---------------------------------------------------------------------------
 // TelegramAdapter
 // ---------------------------------------------------------------------------
@@ -406,6 +437,102 @@ export class TelegramAdapter implements PlatformAdapter {
     for (const c of p.choices) kb.row().text(c.label, `prompt:${id}:${c.id}`);
     await this.sender.send(p.to.chatId, `📋 Plan:\n${truncate(p.planContent, MAX_PLAN_PREVIEW)}`, kb, p.to.topicId);
     return promise;
+  }
+
+  /**
+   * Send a platform-neutral OutboundPayload. Converts markdown → Telegram
+   * HTML, chunks at ≤ 4000 chars (balancing tags across split points),
+   * denormalizes channelData into wire fields, parses threadId, and issues
+   * one or more `sendMessage` calls.
+   *
+   * Per chunk, the retry safety net handles two known Telegram failures:
+   *   • parse error          → retry with chunk.plainText, no parse_mode
+   *   • thread-not-found     → retry without message_thread_id
+   *
+   * Only the FIRST chunk carries `reply_markup` and `reply_parameters` —
+   * subsequent chunks are plain continuations.
+   *
+   * Returns the message id of the first sent chunk (the one with the
+   * keyboard, if any).
+   */
+  async sendPayload(
+    target: OutboundTarget,
+    payload: OutboundPayload,
+  ): Promise<{ messageId?: number }> {
+    // 1. Convert markdown → HTML; append interactive prompt to body.
+    let body = markdownToTelegramHtml(payload.text);
+    if (payload.interactive) {
+      const promptHtml = markdownToTelegramHtml(payload.interactive.prompt);
+      body = body.length > 0 ? `${body}\n\n${promptHtml}` : promptHtml;
+    }
+
+    // 2. Chunk into paired (htmlText, plainText) pieces.
+    const chunks = chunkHtmlMessage(body);
+    if (chunks.length === 0) return {};
+
+    // 3. Build wire-level options once.
+    const replyMarkup = payload.interactive
+      ? buildInteractiveKeyboard(payload.interactive.options)
+      : undefined;
+    const messageThreadId = parseTelegramThread(target.threadId);
+    const quoteText = payload.channelData?.telegram?.quoteText;
+    const replyParameters = quoteText !== undefined
+      ? { quote: quoteText, quote_parse_mode: "HTML" as const }
+      : undefined;
+
+    // 4. Send each chunk with the retry safety net. Only the first chunk
+    //    gets the keyboard / quote — subsequent chunks are continuations.
+    let firstMessageId: number | undefined;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
+      const isFirst = i === 0;
+      const opts: Record<string, unknown> = { parse_mode: "HTML" };
+      if (messageThreadId !== undefined) opts.message_thread_id = messageThreadId;
+      if (isFirst && replyMarkup)        opts.reply_markup = replyMarkup;
+      if (isFirst && replyParameters)    opts.reply_parameters = replyParameters;
+
+      const m = await this.sendChunkWithRetries(target.to, chunk, opts);
+      if (isFirst) firstMessageId = m;
+    }
+
+    return { messageId: firstMessageId };
+  }
+
+  /**
+   * Send one chunk; on a known Telegram error, retry once with the
+   * appropriate workaround. Returns the resulting message id.
+   */
+  private async sendChunkWithRetries(
+    chatId: string,
+    chunk: OutboundChunk,
+    opts: Record<string, unknown>,
+  ): Promise<number> {
+    try {
+      const m = await this.bot.api.sendMessage(chatId, chunk.htmlText, opts as never);
+      return m.message_id;
+    } catch (err: unknown) {
+      const desc = String((err as { description?: string }).description ?? "").toLowerCase();
+
+      // Parse error → retry with plain text and no parse_mode.
+      if (desc.includes("parse entities") || desc.includes("can't parse")) {
+        console.error(`telegram: parse error from API — retrying chunk as plain text`);
+        const plainOpts = { ...opts };
+        delete plainOpts.parse_mode;
+        const m = await this.bot.api.sendMessage(chatId, chunk.plainText, plainOpts as never);
+        return m.message_id;
+      }
+
+      // Thread not found → retry without message_thread_id.
+      if (desc.includes("thread not found") || desc.includes("message thread")) {
+        console.error(`telegram: thread missing — retrying chunk without message_thread_id`);
+        const noThreadOpts = { ...opts };
+        delete noThreadOpts.message_thread_id;
+        const m = await this.bot.api.sendMessage(chatId, chunk.htmlText, noThreadOpts as never);
+        return m.message_id;
+      }
+
+      throw err;
+    }
   }
 
   // -------------------------------------------------------------------------
