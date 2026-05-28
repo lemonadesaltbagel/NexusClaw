@@ -67,6 +67,64 @@ export type RemoteOutput =
   | { kind: "turn_done";   cost?: number };
 
 // ---------------------------------------------------------------------------
+// Outbound payload — platform-neutral shape for one outbound message.
+//
+// Telegram-shaped richness (quote-reply text, etc.) lives under
+// `channelData.telegram`. Markdown→platform-native conversion is the
+// adapter's job, not the payload's. Streaming text grows the same payload
+// over time; the adapter edits the platform message in place and manages
+// the messageId out-of-band, so the payload itself carries no messageId.
+// ---------------------------------------------------------------------------
+
+/** Where an outbound message should land. */
+export interface OutboundTarget {
+  /** Platform name, e.g. "telegram", "slack". */
+  channel: string;
+  /** Native chat / channel / DM id. */
+  to: string;
+  /**
+   * Optional sub-thread within `to`. Free-form per platform; e.g. Telegram
+   * forum topics encode `"<chatId>:topic:<topicId>"`.
+   */
+  threadId?: string;
+}
+
+/** Body of one outbound message — platform-neutral. */
+export interface OutboundPayload {
+  /**
+   * Message text. For chat platforms this is markdown; each adapter is
+   * responsible for converting it to the platform-native wire format.
+   */
+  text: string;
+  /** Optional inline prompt with response buttons. */
+  interactive?: OutboundInteractive;
+  /** Per-channel escape hatch for fields that don't generalize. */
+  channelData?: ChannelData;
+}
+
+export interface OutboundInteractive {
+  /** Heading shown above the buttons. */
+  prompt: string;
+  /** Choice buttons. The `value` is returned to the gateway on click. */
+  options: ReadonlyArray<OutboundChoice>;
+}
+
+export interface OutboundChoice {
+  label: string;
+  value: string;
+}
+
+export interface ChannelData {
+  telegram?: TelegramChannelData;
+  // Future: slack?: SlackChannelData; discord?: DiscordChannelData; …
+}
+
+export interface TelegramChannelData {
+  /** Text rendered above the bot's reply as a quoted excerpt. */
+  quoteText?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Interactive prompts — confirmDangerous / planApproval bridged to the
 // platform. Adapters render these with whatever UI the platform offers
 // (Telegram inline buttons, Slack action blocks, web modal, etc.).
