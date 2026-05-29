@@ -26,6 +26,9 @@ class StubAdapter implements PlatformAdapter {
     this.calls.push({ target, payload });
     return { messageId: 100 + this.calls.length };
   }
+  draftFor(): never {
+    throw new Error("draftFor not used in router tests");
+  }
 }
 
 describe("OutboundRouter", () => {
@@ -65,7 +68,7 @@ describe("OutboundRouter", () => {
     const target: OutboundTarget = { channel: "telegram", to: "-100", threadId: "-100:topic:7" };
     const payload: OutboundPayload = {
       text: "Done! **x**",
-      interactive: { prompt: "?", options: [{ label: "Y", value: "y" }] },
+      interactive: { blocks: [{ type: "buttons", buttons: [{ label: "Y", value: "y" }] }] },
       channelData: { telegram: { quoteText: "ctx" } },
     };
     await r.send(target, payload);

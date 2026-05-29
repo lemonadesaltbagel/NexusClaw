@@ -42,6 +42,7 @@ import {
 } from "@/remote/pairing";
 import { TelegramAdapter, type DmAccessProvider } from "@/remote/adapters/telegram";
 import { generatePairingCode } from "@/remote/adapters/telegram-dm";
+import { DEFAULT_FLOOD_STATE_PATH } from "@/remote/adapters/telegram-flood";
 
 // ---------------------------------------------------------------------------
 // Provider + key resolution (mirrors chatCommand).
@@ -189,6 +190,7 @@ function buildAdapters(
       verbose: process.env.TELEGRAM_VERBOSE === "1",
       access: { groups: settings.remote.telegram.groups },
       dm: buildTelegramDmProvider(state, settings, configPath, pairingPath),
+      floodStatePath: DEFAULT_FLOOD_STATE_PATH,
     }));
   }
   return adapters;

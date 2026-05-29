@@ -149,7 +149,7 @@ export function htmlToPlainText(html: string): string {
 export const MAX_CHUNK_HTML_LENGTH = 4000;
 
 /** Reserved bytes per chunk for the closing-tag suffix the splitter appends. */
-const CLOSE_RESERVE = 200;
+const CLOSE_RESERVE = 400;
 
 export interface OutboundChunk {
   /** HTML body for the chunk, with all open tags closed at the end. */

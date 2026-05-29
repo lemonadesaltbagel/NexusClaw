@@ -167,6 +167,42 @@ export class StreamingMessage {
     this.buffer = "";
     this.firstSend = null;
   }
+
+  // --- DraftStream verbs (issue 2) ---
+  // The adapter remembers the current preview message id internally; callers
+  // never touch it. update extends; flush commits now; materialize finalizes
+  // the bubble as permanent; forceNewMessage starts a fresh bubble next time;
+  // clear/stop drop in-flight tracking without deleting the message.
+
+  update(delta: string): void {
+    this.pushDelta(delta);
+  }
+
+  async flush(): Promise<void> {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    await this.commitEdit();
+  }
+
+  async materialize(): Promise<void> {
+    await this.finalize();
+  }
+
+  forceNewMessage(): void {
+    // Drop the in-flight references so the next update starts a brand-new
+    // bubble. Does NOT delete the previously-sent message.
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.messageId = null;
+    this.buffer = "";
+    this.firstSend = null;
+  }
+
+  async clear(): Promise<void> {
+    this.forceNewMessage();
+  }
+
+  async stop(): Promise<void> {
+    this.forceNewMessage();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,16 +305,74 @@ export function parseTelegramThread(threadId: string | undefined): number | unde
   return m ? Number(m[1]) : undefined;
 }
 
+/** Default row width when auto-chunking generic buttons into rows. */
+export const TELEGRAM_BUTTONS_PER_ROW = 3;
+
 /**
- * Build a grammY InlineKeyboard from an OutboundInteractive's options.
- * Each option is one button; `value` becomes the button's callback_data.
- * Buttons lay out in a single row for now.
+ * Normalize the two media-source fields (`mediaUrl` singular + `mediaUrls`
+ * array) into a single list. The singular form is appended after the array
+ * if both are present.
  */
-export function buildInteractiveKeyboard(
-  options: ReadonlyArray<{ label: string; value: string }>,
-): InlineKeyboard {
+export function normalizeMedia(
+  one: string | undefined,
+  many: ReadonlyArray<string> | undefined,
+): string[] {
+  const out: string[] = [];
+  if (many) for (const m of many) out.push(m);
+  if (one) out.push(one);
+  return out;
+}
+
+/**
+ * Collapse generic `OutboundInteractive` blocks into a flat button list,
+ * auto-chunked into rows of TELEGRAM_BUTTONS_PER_ROW. Text blocks are
+ * dropped here (they should be merged into the body text by the caller).
+ * Selects are flattened to buttons. Placeholder text on selects is ignored
+ * — Telegram inline keyboards don't have a placeholder slot.
+ */
+type AnyInteractiveBlock =
+  | { type: "text";    text: string }
+  | { type: "buttons"; buttons: ReadonlyArray<{ label: string; value: string }> }
+  | {
+      type: "select";
+      placeholder?: string;
+      options: ReadonlyArray<{ label: string; value: string }>;
+    };
+
+export function buildInteractiveKeyboardFromBlocks(
+  blocks: ReadonlyArray<AnyInteractiveBlock>,
+): InlineKeyboard | undefined {
+  const flat: Array<{ label: string; value: string }> = [];
+  for (const b of blocks) {
+    if (b.type === "buttons" && b.buttons) flat.push(...b.buttons);
+    else if (b.type === "select" && b.options) flat.push(...b.options);
+  }
+  if (flat.length === 0) return undefined;
   const kb = new InlineKeyboard();
-  for (const opt of options) kb.text(opt.label, opt.value);
+  for (let i = 0; i < flat.length; i++) {
+    if (i > 0 && i % TELEGRAM_BUTTONS_PER_ROW === 0) kb.row();
+    kb.text(flat[i]!.label, flat[i]!.value);
+  }
+  return kb;
+}
+
+/**
+ * Build a grammY InlineKeyboard from a Telegram-specific 2-D button array.
+ * The caller controls layout fully; callback_data / url / future button
+ * kinds pass through unchanged.
+ */
+export function buildInteractiveKeyboardFromTelegram(
+  rows: ReadonlyArray<ReadonlyArray<{ text: string; callback_data?: string; url?: string }>>,
+): InlineKeyboard | undefined {
+  if (rows.length === 0) return undefined;
+  const kb = new InlineKeyboard();
+  for (let r = 0; r < rows.length; r++) {
+    if (r > 0) kb.row();
+    for (const btn of rows[r]!) {
+      if (btn.url)               kb.url(btn.text, btn.url);
+      else if (btn.callback_data) kb.text(btn.text, btn.callback_data);
+    }
+  }
   return kb;
 }
 
@@ -320,6 +414,11 @@ export interface TelegramAdapterOptions {
    * straight through, useful for tests). Omitted = enabled with defaults.
    */
   flood?: Partial<FloodLimits> | false;
+  /**
+   * Where the flood guard persists abuse counters. Omitted = disabled (in
+   * memory only). Production callers pass `~/.nexusclaw/flood-state.json`.
+   */
+  floodStatePath?: string;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -329,6 +428,8 @@ export class TelegramAdapter implements PlatformAdapter {
   private sender: Sender;
   private handler: ((e: RemoteEvent) => void) | null = null;
   private streams = new Map<string, StreamingMessage>();
+  /** Per-target draft cache, keyed by `chatId:threadId`. */
+  private drafts = new Map<string, StreamingMessage>();
   private prompts = new PromptRegistry();
   private verbose: boolean;
   private access: AccessSettings;
@@ -353,7 +454,12 @@ export class TelegramAdapter implements PlatformAdapter {
       ? null
       : new FloodGuard(
           (msg, signal) => this.dispatchSynthetic(msg, signal),
-          { limits: opts.flood ?? {} },
+          {
+            limits: opts.flood ?? {},
+            // Persistence off by default — opt-in via floodStatePath so
+            // tests and ephemeral processes don't leak abuse history.
+            statePath: opts.floodStatePath ?? null,
+          },
         );
     this.wireHandlers();
   }
@@ -459,43 +565,141 @@ export class TelegramAdapter implements PlatformAdapter {
     target: OutboundTarget,
     payload: OutboundPayload,
   ): Promise<{ messageId?: number }> {
-    // 1. Convert markdown → HTML; append interactive prompt to body.
+    // 1. Convert markdown → HTML; append any `text` blocks from interactive.
     let body = markdownToTelegramHtml(payload.text);
     if (payload.interactive) {
-      const promptHtml = markdownToTelegramHtml(payload.interactive.prompt);
-      body = body.length > 0 ? `${body}\n\n${promptHtml}` : promptHtml;
+      for (const blk of payload.interactive.blocks) {
+        if (blk.type === "text") {
+          const html = markdownToTelegramHtml(blk.text);
+          body = body.length > 0 ? `${body}\n\n${html}` : html;
+        }
+      }
     }
 
-    // 2. Chunk into paired (htmlText, plainText) pieces.
-    const chunks = chunkHtmlMessage(body);
-    if (chunks.length === 0) return {};
+    // 2a. Normalize media. If there's neither text nor media, no-op.
+    const mediaUrls = normalizeMedia(payload.mediaUrl, payload.mediaUrls);
+    if (body.length === 0 && mediaUrls.length === 0) return {};
+
+    // 2b. Chunk into paired (htmlText, plainText) pieces. Used by both the
+    //     text-only path and as caption material for media.
+    const chunks = body.length > 0 ? chunkHtmlMessage(body) : [];
 
     // 3. Build wire-level options once.
-    const replyMarkup = payload.interactive
-      ? buildInteractiveKeyboard(payload.interactive.options)
-      : undefined;
+    //    Keyboard precedence: telegram override beats generic blocks.
+    const tgKb = payload.channelData?.telegram?.inlineKeyboard;
+    const replyMarkup = tgKb
+      ? buildInteractiveKeyboardFromTelegram(tgKb)
+      : (payload.interactive
+          ? buildInteractiveKeyboardFromBlocks(payload.interactive.blocks)
+          : undefined);
     const messageThreadId = parseTelegramThread(target.threadId);
     const quoteText = payload.channelData?.telegram?.quoteText;
-    const replyParameters = quoteText !== undefined
-      ? { quote: quoteText, quote_parse_mode: "HTML" as const }
-      : undefined;
+    const replyToId  = target.replyToId;
 
-    // 4. Send each chunk with the retry safety net. Only the first chunk
-    //    gets the keyboard / quote — subsequent chunks are continuations.
+    // Reply linkage logic:
+    //   id + quote → reply_parameters (real quote + parent link)
+    //   id only    → older reply_to_message_id
+    //   quote only → drop (Bot API rejects reply_parameters without message_id)
+    //   neither    → no linkage
+    let replyParameters:
+      | { message_id: number; quote: string; quote_parse_mode: "HTML" }
+      | undefined;
+    let replyToMessageId: number | undefined;
+    if (replyToId !== undefined && quoteText !== undefined) {
+      replyParameters = { message_id: replyToId, quote: quoteText, quote_parse_mode: "HTML" };
+    } else if (replyToId !== undefined) {
+      replyToMessageId = replyToId;
+    } else if (quoteText !== undefined) {
+      console.warn(
+        "telegram: quoteText without replyToId — dropping quote (Bot API requires message_id)",
+      );
+    }
+
+    // 4. Media-first path: iterate mediaUrls; the first item carries the
+    //    body as caption + the keyboard, subsequent items are media-only.
+    //    forceDocument routes to sendDocument instead of sendPhoto.
+    if (mediaUrls.length > 0) {
+      // Caption can be up to 1024 chars in Telegram. Use the first chunk if
+      // it fits; otherwise no caption (the long-text case is rare for media
+      // replies and is a known gap).
+      const caption = chunks[0] && chunks[0].htmlText.length <= 1024
+        ? chunks[0].htmlText
+        : undefined;
+      let firstMessageId: number | undefined;
+      const useDocument = !!payload.forceDocument;
+      for (let i = 0; i < mediaUrls.length; i++) {
+        const isFirst = i === 0;
+        const opts: Record<string, unknown> = {};
+        if (isFirst && caption) {
+          opts.caption    = caption;
+          opts.parse_mode = "HTML";
+        }
+        if (messageThreadId !== undefined) opts.message_thread_id = messageThreadId;
+        if (payload.silent)                opts.disable_notification = true;
+        if (isFirst && replyMarkup)        opts.reply_markup        = replyMarkup;
+        if (isFirst && replyParameters)    opts.reply_parameters    = replyParameters;
+        if (isFirst && replyToMessageId !== undefined && !replyParameters) {
+          opts.reply_to_message_id = replyToMessageId;
+        }
+        const m = useDocument
+          ? await this.bot.api.sendDocument(target.to, mediaUrls[i]!, opts as never)
+          : await this.bot.api.sendPhoto(target.to, mediaUrls[i]!, opts as never);
+        if (isFirst) firstMessageId = m.message_id;
+      }
+      return { messageId: firstMessageId };
+    }
+
+    // 5. Plain text path. Send each chunk with the retry safety net.
+    //    Only the first chunk gets the keyboard / quote — subsequent
+    //    chunks are continuations.
     let firstMessageId: number | undefined;
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
       const isFirst = i === 0;
+      // Small inter-chunk delay to respect Telegram's per-chat throttling.
+      if (!isFirst) await new Promise((r) => setTimeout(r, 50));
       const opts: Record<string, unknown> = { parse_mode: "HTML" };
       if (messageThreadId !== undefined) opts.message_thread_id = messageThreadId;
-      if (isFirst && replyMarkup)        opts.reply_markup = replyMarkup;
-      if (isFirst && replyParameters)    opts.reply_parameters = replyParameters;
+      if (payload.silent)                opts.disable_notification = true;
+      if (isFirst && replyMarkup)        opts.reply_markup        = replyMarkup;
+      if (isFirst && replyParameters)    opts.reply_parameters    = replyParameters;
+      if (isFirst && replyToMessageId !== undefined && !replyParameters) {
+        opts.reply_to_message_id = replyToMessageId;
+      }
 
-      const m = await this.sendChunkWithRetries(target.to, chunk, opts);
-      if (isFirst) firstMessageId = m;
+      try {
+        const m = await this.sendChunkWithRetries(target.to, chunk, opts);
+        if (isFirst) firstMessageId = m;
+      } catch (err) {
+        // (6) partial-fail log — show which chunk in which sequence broke.
+        if (chunks.length > 1) {
+          console.error(
+            `telegram: partial send — chunk ${i + 1}/${chunks.length} to ${target.to} failed`,
+          );
+        }
+        throw err;
+      }
     }
 
     return { messageId: firstMessageId };
+  }
+
+  /**
+   * Return the per-target draft stream. Cached by `chatId:threadId` so
+   * repeated calls for the same target return the same stream, letting the
+   * adapter remember the in-flight messageId internally across updates.
+   */
+  draftFor(target: OutboundTarget): StreamingMessage {
+    const key = `${target.to}:${target.threadId ?? ""}`;
+    let s = this.drafts.get(key);
+    if (!s) {
+      const threadIdForSend = target.threadId !== undefined
+        ? String(parseTelegramThread(target.threadId) ?? "")
+        : undefined;
+      s = new StreamingMessage(target.to, this.sender, undefined, threadIdForSend || undefined);
+      this.drafts.set(key, s);
+    }
+    return s;
   }
 
   /**
@@ -531,6 +735,17 @@ export class TelegramAdapter implements PlatformAdapter {
         return m.message_id;
       }
 
+      // Rate limited → wait the Retry-After hint and try once more.
+      const errCode = (err as { error_code?: number }).error_code;
+      const retryAfter = (err as { parameters?: { retry_after?: number } }).parameters?.retry_after;
+      if (errCode === 429 && typeof retryAfter === "number" && retryAfter > 0) {
+        const waitMs = Math.min(retryAfter, 60) * 1000;
+        console.error(`telegram: 429 rate limit — sleeping ${waitMs}ms before retry`);
+        await new Promise((r) => setTimeout(r, waitMs));
+        const m = await this.bot.api.sendMessage(chatId, chunk.htmlText, opts as never);
+        return m.message_id;
+      }
+
       throw err;
     }
   }
@@ -552,9 +767,10 @@ export class TelegramAdapter implements PlatformAdapter {
     if (!this.handler) return;
 
     const from: RemoteIdentity = {
-      platform: "telegram",
-      userId:   String(msg.fromUser.id),
-      chatId:   msg.chatId,
+      platform:  "telegram",
+      userId:    String(msg.fromUser.id),
+      chatId:    msg.chatId,
+      messageId: msg.messageId,
       ...(msg.topicId !== undefined ? { topicId: msg.topicId } : {}),
     };
     console.debug(
@@ -732,6 +948,7 @@ export class TelegramAdapter implements PlatformAdapter {
         platform: "telegram",
         userId: String(ctx.from.id),
         chatId: String(ctx.chat.id),
+        messageId: ctx.message.message_id,
         ...(space.kind === "forum" ? { topicId: space.topicId } : {}),
       };
       console.debug(

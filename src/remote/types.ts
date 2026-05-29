@@ -22,6 +22,12 @@ export interface RemoteIdentity {
    * lane in the gateway.
    */
   topicId?: string;
+  /**
+   * Native id of the inbound message this identity was captured from.
+   * Carried alongside chat/thread/account so outbound replies can quote
+   * or thread to the originating message without re-plumbing it.
+   */
+  messageId?: number;
 }
 
 /** A unique key derived from a RemoteIdentity (used as a Map key). */
@@ -87,6 +93,13 @@ export interface OutboundTarget {
    * forum topics encode `"<chatId>:topic:<topicId>"`.
    */
   threadId?: string;
+  /**
+   * Native id of the message to reply to. Combined with optional
+   * `channelData.<channel>.quoteText` to render a proper quoted reply.
+   * Captured by adapters from the inbound message and threaded through
+   * so the agent doesn't need to know about message ids.
+   */
+  replyToId?: number;
 }
 
 /** Body of one outbound message — platform-neutral. */
@@ -100,18 +113,51 @@ export interface OutboundPayload {
   interactive?: OutboundInteractive;
   /** Per-channel escape hatch for fields that don't generalize. */
   channelData?: ChannelData;
+  /**
+   * Single attachment source — convenience for the common one-media case.
+   * Normalized into `mediaUrls` by the shared helper before the adapter
+   * sees it.
+   */
+  mediaUrl?: string;
+  /** Multiple attachment sources, in display order. */
+  mediaUrls?: ReadonlyArray<string>;
+  /**
+   * Force images to be sent as documents (uncompressed). Affects how
+   * adapters route to sendPhoto vs sendDocument; ignored by platforms
+   * without that distinction.
+   */
+  forceDocument?: boolean;
+  /**
+   * Send without notification sound (and without push for some platforms).
+   * Maps to `disable_notification` on Telegram.
+   */
+  silent?: boolean;
 }
 
+/**
+ * Cross-channel interactive reply. A small ordered list of blocks: text,
+ * buttons, select. Each adapter renders this into its native UI. For richer
+ * platform-specific layouts (e.g. Telegram's full 2-D inline_keyboard with
+ * arbitrary callback data), use `channelData.<channel>` on the payload.
+ */
 export interface OutboundInteractive {
-  /** Heading shown above the buttons. */
-  prompt: string;
-  /** Choice buttons. The `value` is returned to the gateway on click. */
-  options: ReadonlyArray<OutboundChoice>;
+  blocks: ReadonlyArray<InteractiveBlock>;
 }
 
-export interface OutboundChoice {
+export type InteractiveBlock =
+  | { type: "text";    text: string }
+  | { type: "buttons"; buttons: ReadonlyArray<InteractiveButton> }
+  | {
+      type: "select";
+      placeholder?: string;
+      options: ReadonlyArray<InteractiveButton>;
+    };
+
+export interface InteractiveButton {
   label: string;
   value: string;
+  /** Visual emphasis hint. Platforms without colored buttons may ignore. */
+  style?: "primary" | "secondary" | "success" | "danger";
 }
 
 export interface ChannelData {
@@ -122,6 +168,45 @@ export interface ChannelData {
 export interface TelegramChannelData {
   /** Text rendered above the bot's reply as a quoted excerpt. */
   quoteText?: string;
+  /**
+   * Telegram-specific inline keyboard override. When present, takes
+   * priority over the generic `interactive` blocks. Free-form 2-D array
+   * matching grammY's `InlineKeyboardButton[][]`; the adapter sends it
+   * through unchanged.
+   */
+  inlineKeyboard?: ReadonlyArray<ReadonlyArray<TelegramInlineButton>>;
+}
+
+/**
+ * Subset of grammY's `InlineKeyboardButton`. Captures the common shapes
+ * (callback, url, web app) without coupling to grammY's exact types.
+ */
+export interface TelegramInlineButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+
+// ---------------------------------------------------------------------------
+// DraftStream — owns the live "preview" bubble for one target. The agent
+// never sees this object; the Coordinator drives it. The adapter remembers
+// the current preview message id internally — callers don't pass it.
+//
+// Verbs:
+//   update(delta)      — extend the preview text
+//   flush()            — commit current text to the bubble now
+//   materialize()      — finalize the draft as a permanent message
+//   forceNewMessage()  — next update opens a fresh bubble
+//   clear() / stop()   — drop in-flight tracking (does not delete the message)
+// ---------------------------------------------------------------------------
+
+export interface DraftStream {
+  update(delta: string): void;
+  flush(): Promise<void>;
+  materialize(): Promise<void>;
+  forceNewMessage(): void;
+  clear(): Promise<void>;
+  stop(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,4 +262,10 @@ export interface PlatformAdapter {
    * later edits / streaming.
    */
   sendPayload(target: OutboundTarget, payload: OutboundPayload): Promise<{ messageId?: number }>;
+
+  /**
+   * Return the per-target draft stream. The adapter caches one per
+   * (chatId, threadId) so the same bubble is reused across updates.
+   */
+  draftFor(target: OutboundTarget): DraftStream;
 }

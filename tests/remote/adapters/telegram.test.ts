@@ -1183,7 +1183,9 @@ describe("flood guard — integration", () => {
 
 import {
   parseTelegramThread,
-  buildInteractiveKeyboard,
+  buildInteractiveKeyboardFromBlocks,
+  buildInteractiveKeyboardFromTelegram,
+  TELEGRAM_BUTTONS_PER_ROW,
 } from "@/remote/adapters/telegram";
 
 describe("parseTelegramThread", () => {
@@ -1201,18 +1203,84 @@ describe("parseTelegramThread", () => {
   });
 });
 
-describe("buildInteractiveKeyboard", () => {
-  test("each option becomes a button with callback_data = value", () => {
-    const kb = buildInteractiveKeyboard([
-      { label: "Approve", value: "approve" },
-      { label: "Reject",  value: "reject" },
-    ]);
-    // grammY's InlineKeyboard exposes `inline_keyboard` as a 2D array.
+describe("buildInteractiveKeyboardFromBlocks", () => {
+  test("buttons block becomes a single-row keyboard when under chunk size", () => {
+    const kb = buildInteractiveKeyboardFromBlocks([
+      { type: "buttons", buttons: [
+        { label: "Approve", value: "approve" },
+        { label: "Reject",  value: "reject"  },
+      ] },
+    ])!;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rows = (kb as any).inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveLength(2);
     expect(rows[0]![0]).toMatchObject({ text: "Approve", callback_data: "approve" });
     expect(rows[0]![1]).toMatchObject({ text: "Reject",  callback_data: "reject" });
+  });
+
+  test("auto-chunks buttons into rows of TELEGRAM_BUTTONS_PER_ROW", () => {
+    const buttons = Array.from({ length: 7 }, (_, i) => ({ label: `b${i}`, value: `v${i}` }));
+    const kb = buildInteractiveKeyboardFromBlocks([{ type: "buttons", buttons }])!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<unknown>>;
+    expect(TELEGRAM_BUTTONS_PER_ROW).toBe(3);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveLength(3);
+    expect(rows[1]).toHaveLength(3);
+    expect(rows[2]).toHaveLength(1);
+  });
+
+  test("text blocks are skipped at the keyboard level", () => {
+    const kb = buildInteractiveKeyboardFromBlocks([
+      { type: "text", text: "ignored" },
+      { type: "buttons", buttons: [{ label: "Y", value: "y" }] },
+    ])!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveLength(1);
+  });
+
+  test("returns undefined when no buttons", () => {
+    expect(buildInteractiveKeyboardFromBlocks([])).toBeUndefined();
+    expect(buildInteractiveKeyboardFromBlocks([{ type: "text", text: "x" }])).toBeUndefined();
+  });
+
+  test("select block options are flattened to buttons", () => {
+    const kb = buildInteractiveKeyboardFromBlocks([
+      { type: "select", placeholder: "Pick", options: [
+        { label: "A", value: "a" },
+        { label: "B", value: "b" },
+      ] },
+    ])!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+    expect(rows[0]![0]).toMatchObject({ text: "A", callback_data: "a" });
+  });
+});
+
+describe("buildInteractiveKeyboardFromTelegram", () => {
+  test("preserves the 2-D layout exactly", () => {
+    const kb = buildInteractiveKeyboardFromTelegram([
+      [{ text: "A", callback_data: "a" }, { text: "B", callback_data: "b" }],
+      [{ text: "C", callback_data: "c" }],
+    ])!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<{ text: string; callback_data?: string; url?: string }>>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveLength(2);
+    expect(rows[1]).toHaveLength(1);
+    expect(rows[0]![0]).toMatchObject({ text: "A", callback_data: "a" });
+  });
+
+  test("url buttons are passed through", () => {
+    const kb = buildInteractiveKeyboardFromTelegram([
+      [{ text: "Docs", url: "https://example.com" }],
+    ])!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (kb as any).inline_keyboard as Array<Array<{ text: string; url?: string }>>;
+    expect(rows[0]![0]).toMatchObject({ text: "Docs", url: "https://example.com" });
   });
 });
 
@@ -1275,10 +1343,12 @@ describe("TelegramAdapter.sendPayload", () => {
       {
         text: "Done!",
         interactive: {
-          prompt: "Approve the change?",
-          options: [
-            { label: "Approve", value: "approve" },
-            { label: "Reject",  value: "reject"  },
+          blocks: [
+            { type: "text", text: "Approve the change?" },
+            { type: "buttons", buttons: [
+              { label: "Approve", value: "approve" },
+              { label: "Reject",  value: "reject"  },
+            ] },
           ],
         },
       },
@@ -1288,16 +1358,17 @@ describe("TelegramAdapter.sendPayload", () => {
     expect(calls[0]!.options.reply_markup).toBeDefined();
   });
 
-  test("channelData.telegram.quoteText becomes reply_parameters.quote", async () => {
+  test("channelData.telegram.quoteText + replyToId becomes reply_parameters.quote", async () => {
     const { adapter, calls } = stubAdapter();
     await adapter.sendPayload(
-      { channel: "telegram", to: "42" },
+      { channel: "telegram", to: "42", replyToId: 123 },
       {
         text: "Done!",
         channelData: { telegram: { quoteText: "I updated README.md" } },
       },
     );
-    const rp = calls[0]!.options.reply_parameters as { quote: string; quote_parse_mode: string };
+    const rp = calls[0]!.options.reply_parameters as { message_id: number; quote: string; quote_parse_mode: string };
+    expect(rp.message_id).toBe(123);
     expect(rp.quote).toBe("I updated README.md");
     expect(rp.quote_parse_mode).toBe("HTML");
   });
@@ -1310,6 +1381,299 @@ describe("TelegramAdapter.sendPayload", () => {
     );
     expect(calls[0]!.options.reply_parameters).toBeUndefined();
   });
+
+  test("channelData.telegram.inlineKeyboard wins over generic interactive blocks", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "hi",
+        interactive: { blocks: [{ type: "buttons", buttons: [{ label: "G", value: "g" }] }] },
+        channelData: { telegram: { inlineKeyboard: [
+          [{ text: "TG-A", callback_data: "a" }],
+          [{ text: "TG-B", url: "https://x" }],
+        ] } },
+      },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = (calls[0]!.options.reply_markup as any).inline_keyboard as Array<Array<{ text: string }>>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]![0]).toMatchObject({ text: "TG-A" });
+    expect(rows[1]![0]).toMatchObject({ text: "TG-B" });
+  });
+
+  test("text blocks in interactive get appended to the body", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "Done!",
+        interactive: { blocks: [
+          { type: "text", text: "Approve?" },
+          { type: "buttons", buttons: [{ label: "Y", value: "y" }] },
+        ] },
+      },
+    );
+    expect(calls[0]!.text).toContain("Done!");
+    expect(calls[0]!.text).toContain("Approve?");
+    expect(calls[0]!.options.reply_markup).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue 9 — media list + forceDocument
+// ---------------------------------------------------------------------------
+
+import { normalizeMedia } from "@/remote/adapters/telegram";
+
+describe("normalizeMedia", () => {
+  test("returns empty when both inputs are absent", () => {
+    expect(normalizeMedia(undefined, undefined)).toEqual([]);
+  });
+  test("mediaUrls array passes through", () => {
+    expect(normalizeMedia(undefined, ["a", "b"])).toEqual(["a", "b"]);
+  });
+  test("singular mediaUrl is appended after the array", () => {
+    expect(normalizeMedia("z", ["a", "b"])).toEqual(["a", "b", "z"]);
+  });
+  test("singular mediaUrl alone becomes a one-item list", () => {
+    expect(normalizeMedia("x", undefined)).toEqual(["x"]);
+  });
+});
+
+describe("TelegramAdapter.sendPayload — media routing", () => {
+  interface MediaCall {
+    kind: "photo" | "document" | "text";
+    chatId: string;
+    media?: string;
+    text?: string;
+    options: Record<string, unknown>;
+  }
+
+  function mediaAdapter(): { adapter: TelegramAdapter; calls: MediaCall[] } {
+    const calls: MediaCall[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    let id = 7000;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (chatId: string, text: string, options: Record<string, unknown>) => {
+      calls.push({ kind: "text", chatId, text, options });
+      return { message_id: id++ };
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendPhoto = async (chatId: string, media: string, options: Record<string, unknown>) => {
+      calls.push({ kind: "photo", chatId, media, options });
+      return { message_id: id++ };
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendDocument = async (chatId: string, media: string, options: Record<string, unknown>) => {
+      calls.push({ kind: "document", chatId, media, options });
+      return { message_id: id++ };
+    };
+    return { adapter, calls };
+  }
+
+  test("no media + no text → no-op (no API call, no throw)", async () => {
+    const { adapter, calls } = mediaAdapter();
+    const res = await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "" },
+    );
+    expect(calls).toEqual([]);
+    expect(res.messageId).toBeUndefined();
+  });
+
+  test("no media + text → sendMessage path (unchanged)", async () => {
+    const { adapter, calls } = mediaAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "hi" },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.kind).toBe("text");
+  });
+
+  test("single mediaUrl with short text → sendPhoto with caption + keyboard", async () => {
+    const { adapter, calls } = mediaAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "Done!",
+        mediaUrl: "https://example.com/cat.jpg",
+        interactive: { blocks: [{ type: "buttons", buttons: [{ label: "Y", value: "y" }] }] },
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.kind).toBe("photo");
+    expect(calls[0]!.media).toBe("https://example.com/cat.jpg");
+    expect(calls[0]!.options.caption).toContain("Done!");
+    expect(calls[0]!.options.parse_mode).toBe("HTML");
+    expect(calls[0]!.options.reply_markup).toBeDefined();
+  });
+
+  test("multiple media → first has caption + keyboard, rest are media-only", async () => {
+    const { adapter, calls } = mediaAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      {
+        text: "Look",
+        mediaUrls: ["https://x/a.jpg", "https://x/b.jpg", "https://x/c.jpg"],
+        interactive: { blocks: [{ type: "buttons", buttons: [{ label: "Y", value: "y" }] }] },
+      },
+    );
+    expect(calls).toHaveLength(3);
+    expect(calls[0]!.options.caption).toContain("Look");
+    expect(calls[0]!.options.reply_markup).toBeDefined();
+    expect(calls[1]!.options.caption).toBeUndefined();
+    expect(calls[1]!.options.reply_markup).toBeUndefined();
+    expect(calls[2]!.options.caption).toBeUndefined();
+    expect(calls[2]!.options.reply_markup).toBeUndefined();
+  });
+
+  test("forceDocument: true routes to sendDocument instead of sendPhoto", async () => {
+    const { adapter, calls } = mediaAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "raw", mediaUrl: "https://x/raw.png", forceDocument: true },
+    );
+    expect(calls[0]!.kind).toBe("document");
+  });
+
+  test("media with very long text → caption omitted, photo sent without caption", async () => {
+    const { adapter, calls } = mediaAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "x".repeat(2000), mediaUrl: "https://x/a.jpg" },
+    );
+    expect(calls[0]!.kind).toBe("photo");
+    expect(calls[0]!.options.caption).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue 2 — draftFor() returns the per-target DraftStream with verbs
+// ---------------------------------------------------------------------------
+
+describe("TelegramAdapter.draftFor", () => {
+  test("same (chatId, threadId) returns the same draft instance", () => {
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
+    const a = adapter.draftFor({ channel: "telegram", to: "42" });
+    const b = adapter.draftFor({ channel: "telegram", to: "42" });
+    expect(a).toBe(b);
+  });
+
+  test("different chatIds get different drafts", () => {
+    const { sender } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
+    const a = adapter.draftFor({ channel: "telegram", to: "1" });
+    const b = adapter.draftFor({ channel: "telegram", to: "2" });
+    expect(a).not.toBe(b);
+  });
+
+  test("draft.update + materialize sends then finalizes through the sender", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
+    const d = adapter.draftFor({ channel: "telegram", to: "42" });
+    d.update("hello ");
+    d.update("world");
+    await new Promise((r) => setTimeout(r, 10));  // let firstSend microtask run
+    await d.materialize();
+    const sends = calls.filter((c) => c.op === "send");
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.text.startsWith("hello")).toBe(true);
+  });
+
+  test("forceNewMessage drops in-flight tracking; next update starts a fresh send", async () => {
+    const { sender, calls } = makeFakeSender();
+    const adapter = new TelegramAdapter({ token: "t", sender, flood: false });
+    const d = adapter.draftFor({ channel: "telegram", to: "42" });
+    d.update("turn 1");
+    await new Promise((r) => setTimeout(r, 10));
+    await d.materialize();
+    d.forceNewMessage();
+    d.update("turn 2");
+    await new Promise((r) => setTimeout(r, 10));
+    const sends = calls.filter((c) => c.op === "send");
+    expect(sends).toHaveLength(2);
+    expect(sends[1]!.text).toBe("turn 2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Obvious fixes: 429 backoff, partial-fail log, silent field
+// ---------------------------------------------------------------------------
+
+describe("sendPayload — silent field", () => {
+  test("silent: true sets disable_notification on text path", async () => {
+    interface Call { options: Record<string, unknown> }
+    const calls: Call[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (_c: string, _t: string, options: Record<string, unknown>) => {
+      calls.push({ options });
+      return { message_id: 1 };
+    };
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "hi", silent: true },
+    );
+    expect(calls[0]!.options.disable_notification).toBe(true);
+  });
+
+  test("silent: true also affects sendPhoto media path", async () => {
+    interface Call { options: Record<string, unknown> }
+    const calls: Call[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendPhoto = async (_c: string, _m: string, options: Record<string, unknown>) => {
+      calls.push({ options });
+      return { message_id: 1 };
+    };
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "look", mediaUrl: "https://x/a.jpg", silent: true },
+    );
+    expect(calls[0]!.options.disable_notification).toBe(true);
+  });
+});
+
+describe("sendPayload — 429 retry-after backoff", () => {
+  test("429 with retry_after waits and retries successfully", async () => {
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    let attempt = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (_c: string, _t: string, _options: Record<string, unknown>) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const err = new Error("Too Many Requests") as Error & {
+          description: string; error_code: number; parameters: { retry_after: number };
+        };
+        err.description = "Too Many Requests";
+        err.error_code  = 429;
+        err.parameters  = { retry_after: 1 };  // 1 second
+        throw err;
+      }
+      return { message_id: 9999 };
+    };
+    const res = await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "hi" },
+    );
+    expect(attempt).toBe(2);
+    expect(res.messageId).toBe(9999);
+  }, 10_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1710,7 @@ describe("TelegramAdapter.sendPayload — chunked sends", () => {
       { channel: "telegram", to: "42" },
       {
         text: body,
-        interactive: { prompt: "?", options: [{ label: "Y", value: "y" }] },
+        interactive: { blocks: [{ type: "buttons", buttons: [{ label: "Y", value: "y" }] }] },
       },
     );
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -1439,5 +1803,90 @@ describe("TelegramAdapter.sendPayload — retry safety net", () => {
       adapter.sendPayload({ channel: "telegram", to: "42" }, { text: "hi" }),
     ).rejects.toThrow(/chat not found/);
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue 1 — replyToId capture (inbound) + dispatch (outbound)
+// ---------------------------------------------------------------------------
+
+describe("inbound — captures messageId on RemoteIdentity", () => {
+  test("a text message arrives with `from.messageId` set to ctx.message.message_id", async () => {
+    const { events, feed } = makeAdapter();
+    await feed(makeTextUpdate(7, "hi"));
+    expect(events).toHaveLength(1);
+    expect(events[0]!.from.messageId).toBe(700);  // makeTextUpdate uses updateId * 100
+  });
+});
+
+describe("outbound — replyToId + quoteText combination logic", () => {
+  interface ApiCall {
+    chatId: string;
+    text:   string;
+    options: Record<string, unknown>;
+  }
+
+  function stubAdapter(): { adapter: TelegramAdapter; calls: ApiCall[] } {
+    const calls: ApiCall[] = [];
+    const adapter = new TelegramAdapter({ token: "t", flood: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bot = (adapter as any).bot;
+    bot.botInfo = BOT_INFO;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bot.api.sendMessage = async (chatId: string, text: string, options: Record<string, unknown>) => {
+      calls.push({ chatId, text, options });
+      return { message_id: 999 };
+    };
+    return { adapter, calls };
+  }
+
+  test("id + quote → reply_parameters with message_id + quote", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42", replyToId: 500 },
+      { text: "ok", channelData: { telegram: { quoteText: "your line" } } },
+    );
+    const rp = calls[0]!.options.reply_parameters as { message_id: number; quote: string };
+    expect(rp.message_id).toBe(500);
+    expect(rp.quote).toBe("your line");
+    expect(calls[0]!.options.reply_to_message_id).toBeUndefined();
+  });
+
+  test("id only → reply_to_message_id (older shape)", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42", replyToId: 500 },
+      { text: "ok" },
+    );
+    expect(calls[0]!.options.reply_to_message_id).toBe(500);
+    expect(calls[0]!.options.reply_parameters).toBeUndefined();
+  });
+
+  test("quote only → no reply linkage, console warn", async () => {
+    const { adapter, calls } = stubAdapter();
+    const origWarn = console.warn;
+    let warned = "";
+    console.warn = (...a: unknown[]) => { warned = a.map(String).join(" "); };
+    try {
+      await adapter.sendPayload(
+        { channel: "telegram", to: "42" },
+        { text: "ok", channelData: { telegram: { quoteText: "ctx" } } },
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(calls[0]!.options.reply_parameters).toBeUndefined();
+    expect(calls[0]!.options.reply_to_message_id).toBeUndefined();
+    expect(warned).toContain("quoteText without replyToId");
+  });
+
+  test("neither → no reply linkage", async () => {
+    const { adapter, calls } = stubAdapter();
+    await adapter.sendPayload(
+      { channel: "telegram", to: "42" },
+      { text: "ok" },
+    );
+    expect(calls[0]!.options.reply_parameters).toBeUndefined();
+    expect(calls[0]!.options.reply_to_message_id).toBeUndefined();
   });
 });

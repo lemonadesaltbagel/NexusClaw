@@ -45,6 +45,10 @@ class FakeAdapter implements PlatformAdapter {
     return {};
   }
 
+  draftFor(): never {
+    throw new Error("draftFor not used in Gateway tests");
+  }
+
   /** Test helper — push an event into the gateway. */
   fire(e: RemoteEvent): void {
     if (!this.handler) throw new Error("FakeAdapter has no handler yet");
