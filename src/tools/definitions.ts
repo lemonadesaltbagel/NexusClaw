@@ -419,3 +419,105 @@ export function setActiveImageTool(g: GatedImageTool | null): void {
 export function getActiveImageTool(): GatedImageTool | null {
   return activeImageTool;
 }
+
+// ---------------------------------------------------------------------------
+// analyze_pdf — conditionally registered. Same gating contract as the
+// image tool: explicit `configuredPdfModel` wins; otherwise fall back to
+// the main model if it has native PDF; otherwise hide the tool.
+// ---------------------------------------------------------------------------
+
+import { parsePdfModelId, modelHasNativePdf, lookupPdfCapability } from "@/tools/pdf-models";
+import { resolvePdfProvider } from "@/tools/pdf-provider";
+
+export interface PdfToolEnvironment {
+  /** Main model in use. Used to pick description wording + native capability check. */
+  mainModel: string;
+  /** Explicit config request for a PDF model. Same format as image: "provider/model" or bare. */
+  configuredPdfModel?: string;
+  /** Agent working directory — required when configuredPdfModel is set. */
+  agentDir?: string;
+}
+
+export interface GatedPdfTool {
+  tool:     ToolDef;
+  provider: string;
+  model:    string;
+}
+
+const PDF_TOOL_DESCRIPTION =
+  "Analyze one or more PDF documents with a model. Supports native PDF " +
+  "analysis for Anthropic and Google models, with text/image extraction " +
+  "fallback for other providers. Use `pdf` for a single path/URL, or " +
+  "`pdfs` for multiple (up to 10). Provide a prompt describing what to analyze.";
+
+/** Shared input schema for analyze_pdf. All fields individually optional. */
+export const ANALYZE_PDF_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    pdf: {
+      type:        "string",
+      description: "Path / URL / data-URL for a single PDF. Mutually compatible with `pdfs`.",
+    },
+    pdfs: {
+      type:        "array",
+      items:       { type: "string" },
+      description: "List of paths / URLs / data-URLs (up to 10).",
+    },
+    prompt: {
+      type:        "string",
+      description: "Question or instruction for the model. Default: \"Describe the PDF.\"",
+    },
+    pages: {
+      type:        "string",
+      description: "Page range to process, e.g. \"1-5\", \"1,3,5-7\". Defaults to all pages.",
+    },
+  },
+};
+
+export function gateAnalyzePdf(env: PdfToolEnvironment): GatedPdfTool | null {
+  // (a) Explicit config demand.
+  if (env.configuredPdfModel) {
+    if (!env.agentDir) {
+      throw new Error(
+        `analyze_pdf: configuredPdfModel "${env.configuredPdfModel}" was ` +
+        `requested but no agentDir is configured. Set the agent working directory ` +
+        `or remove the pdfModel demand.`,
+      );
+    }
+    const parsed = parsePdfModelId(env.configuredPdfModel);
+    if (!parsed) return null;
+    if (!resolvePdfProvider(parsed.provider, parsed.model)) return null;
+    return {
+      tool: { name: "analyze_pdf", description: PDF_TOOL_DESCRIPTION, input_schema: ANALYZE_PDF_SCHEMA },
+      provider: parsed.provider,
+      model:    parsed.model,
+    };
+  }
+
+  // (b) Main model has native PDF; reuse it.
+  const cap = lookupPdfCapability(env.mainModel);
+  if (cap && cap.nativePdf && resolvePdfProvider(cap.provider, env.mainModel)) {
+    return {
+      tool: { name: "analyze_pdf", description: PDF_TOOL_DESCRIPTION, input_schema: ANALYZE_PDF_SCHEMA },
+      provider: cap.provider,
+      model:    env.mainModel,
+    };
+  }
+
+  // (c) Nothing to offer.
+  return null;
+}
+
+// Touch the helper so eslint/tsc doesn't flag the unused-import warning
+// when this file is consumed without the native-pdf check directly.
+export { modelHasNativePdf };
+
+let activePdfTool: GatedPdfTool | null = null;
+
+export function setActivePdfTool(g: GatedPdfTool | null): void {
+  activePdfTool = g;
+}
+
+export function getActivePdfTool(): GatedPdfTool | null {
+  return activePdfTool;
+}

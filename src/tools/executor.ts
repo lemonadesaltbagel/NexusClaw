@@ -12,8 +12,15 @@ import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
 import { analyzeImage } from "@/tools/handlers/analyze_image";
-import { toolDefinitions, activatedTools, getActiveImageTool } from "@/tools/definitions";
+import { analyzePdf } from "@/tools/handlers/analyze_pdf";
+import {
+  toolDefinitions,
+  activatedTools,
+  getActiveImageTool,
+  getActivePdfTool,
+} from "@/tools/definitions";
 import { resolveImageProvider } from "@/tools/image-provider";
+import { resolvePdfProvider, getPdfExtractor } from "@/tools/pdf-provider";
 import { executeSkill } from "@/core/skills";
 import type { McpManager } from "@/core/mcp";
 
@@ -128,6 +135,29 @@ export async function executeTool(
         else if (out.error === "read_failed")   result = `Error: could not read "${out.path}": ${out.cause}`;
         else if (out.error === "model_failed")  result = "Error: vision model call failed: " + (out.attempts.at(-1)?.error ?? "unknown");
         else                                    result = "Error: analyze_image failed.";
+      } else {
+        result = out.content[0]!.text;
+      }
+      break;
+    }
+    case "analyze_pdf": {
+      const gated = getActivePdfTool();
+      if (!gated) { result = "Error: analyze_pdf is not available in this environment."; break; }
+      const provider  = resolvePdfProvider(gated.provider, gated.model);
+      if (!provider)  { result = "Error: PDF provider could not be resolved."; break; }
+      const extractor = getPdfExtractor();
+      const out = await analyzePdf(
+        input as { pdf?: string; pdfs?: string[]; prompt?: string; pages?: string },
+        { provider, extractor, workspaceDir: process.cwd() },
+      );
+      if ("error" in out) {
+        if (out.error === "too_many_pdfs")   result = `Error: too many PDFs (${out.count} > 10).`;
+        else if (out.error === "no_pdfs")       result = "Error: no PDF was provided.";
+        else if (out.error === "no_provider")   result = "Error: PDF provider missing at execution time.";
+        else if (out.error === "no_extractor")  result = "Error: PDF extractor not configured (required when `pages` is set or provider lacks native PDF).";
+        else if (out.error === "read_failed")   result = `Error: could not read "${out.path}": ${out.cause}`;
+        else if (out.error === "model_failed")  result = "Error: PDF model call failed: " + (out.attempts.at(-1)?.error ?? "unknown");
+        else                                    result = "Error: analyze_pdf failed.";
       } else {
         result = out.content[0]!.text;
       }
