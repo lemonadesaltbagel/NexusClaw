@@ -11,7 +11,9 @@ import { listFiles } from "@/tools/handlers/list_files";
 import { grepSearch } from "@/tools/handlers/grep_search";
 import { runShell } from "@/tools/handlers/run_shell";
 import { webFetch } from "@/tools/handlers/web_fetch";
-import { toolDefinitions, activatedTools } from "@/tools/definitions";
+import { analyzeImage } from "@/tools/handlers/analyze_image";
+import { toolDefinitions, activatedTools, getActiveImageTool } from "@/tools/definitions";
+import { resolveImageProvider } from "@/tools/image-provider";
 import { executeSkill } from "@/core/skills";
 import type { McpManager } from "@/core/mcp";
 
@@ -110,6 +112,27 @@ export async function executeTool(
     case "web_fetch":
       result = await webFetch(input as { url: string; max_length?: number });
       break;
+    case "analyze_image": {
+      const gated = getActiveImageTool();
+      if (!gated) { result = "Error: analyze_image is not available in this environment."; break; }
+      const provider = resolveImageProvider(gated.provider, gated.model);
+      if (!provider) { result = "Error: image provider could not be resolved."; break; }
+      const out = await analyzeImage(
+        input as { image?: string; images?: string[]; prompt?: string },
+        { provider, workspaceDir: process.cwd() },
+      );
+      if ("error" in out) {
+        if (out.error === "too_many_images") result = `Error: too many images (${out.count} > 20).`;
+        else if (out.error === "no_images")     result = "Error: no image was provided.";
+        else if (out.error === "no_provider")   result = "Error: image provider missing at execution time.";
+        else if (out.error === "read_failed")   result = `Error: could not read "${out.path}": ${out.cause}`;
+        else if (out.error === "model_failed")  result = "Error: vision model call failed: " + (out.attempts.at(-1)?.error ?? "unknown");
+        else                                    result = "Error: analyze_image failed.";
+      } else {
+        result = out.content[0]!.text;
+      }
+      break;
+    }
     case "skill": {
       const skillResult = executeSkill(
         input.skill_name as string,

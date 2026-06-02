@@ -283,3 +283,139 @@ export function getDeferredToolNames(allTools?: ToolDef[]): string[] {
     .filter((t) => t.deferred && !activatedTools.has(t.name))
     .map((t) => t.name);
 }
+
+// ---------------------------------------------------------------------------
+// analyze_image — conditionally registered. Returns null (and the tool is
+// hidden from the model) when:
+//   * no resolvable image-model provider pair, AND
+//   * config does NOT explicitly demand an image model
+//
+// Throws when config explicitly requests an imageModel but the agent
+// has no agentDir to land its media/auth state. The implicit case
+// (no explicit demand, no agentDir) is silent.
+// ---------------------------------------------------------------------------
+
+import { parseModelId, modelHasNativeVision, lookupCapability } from "@/tools/image-models";
+import { resolveImageProvider } from "@/tools/image-provider";
+
+export interface ImageToolEnvironment {
+  /** Main model in use. Used to pick description wording + native vision check. */
+  mainModel: string;
+  /**
+   * Explicit config request for an image model. Format: "provider/model"
+   * or a bare model name we can infer the provider from.
+   */
+  configuredImageModel?: string;
+  /** Agent working directory — required when configuredImageModel is set. */
+  agentDir?: string;
+}
+
+export interface GatedImageTool {
+  tool:     ToolDef;
+  /** Resolved (provider, model) pair the handler should use. */
+  provider: string;
+  model:    string;
+}
+
+/**
+ * Compute the description text. Switches based on whether the main model
+ * already has native vision — that affects whether the tool should
+ * encourage the model to use it.
+ */
+function describeAnalyzeImage(mainModel: string): string {
+  if (modelHasNativeVision(mainModel)) {
+    return (
+      "Analyze one or more images with a vision model. " +
+      "Use `image` for a single path/URL, or `images` for multiple (up to 20). " +
+      "Only use this tool when images were NOT already provided in the user's " +
+      "message. Images mentioned in the prompt are automatically visible to you."
+    );
+  }
+  return (
+    "Analyze one or more images with the configured image model " +
+    "(agents.defaults.imageModel). Use `image` for a single path/URL, or " +
+    "`images` for multiple (up to 20). Provide a prompt describing what to analyze."
+  );
+}
+
+/**
+ * Build the analyze_image tool definition and resolved (provider, model)
+ * pair. Returns null when the tool should be hidden.
+ *
+ * Resolution precedence:
+ *   1. explicit `configuredImageModel`           (config demand)
+ *   2. main model itself, if it has native vision
+ *   3. nothing → return null
+ */
+export function gateAnalyzeImage(env: ImageToolEnvironment): GatedImageTool | null {
+  // Step (a) — config explicitly demanded an image model.
+  if (env.configuredImageModel) {
+    if (!env.agentDir) {
+      throw new Error(
+        `analyze_image: configuredImageModel "${env.configuredImageModel}" was ` +
+        `requested but no agentDir is configured. Set the agent working directory ` +
+        `or remove the imageModel demand.`,
+      );
+    }
+    const parsed = parseModelId(env.configuredImageModel);
+    if (!parsed) return null;
+    if (!resolveImageProvider(parsed.provider, parsed.model)) return null;
+    return {
+      tool: {
+        name:        "analyze_image",
+        description: describeAnalyzeImage(env.mainModel),
+        input_schema: ANALYZE_IMAGE_SCHEMA,
+      },
+      provider: parsed.provider,
+      model:    parsed.model,
+    };
+  }
+
+  // Step (b) — main model has native vision; reuse it without explicit config.
+  const cap = lookupCapability(env.mainModel);
+  if (cap && cap.vision && resolveImageProvider(cap.provider, env.mainModel)) {
+    return {
+      tool: {
+        name:        "analyze_image",
+        description: describeAnalyzeImage(env.mainModel),
+        input_schema: ANALYZE_IMAGE_SCHEMA,
+      },
+      provider: cap.provider,
+      model:    env.mainModel,
+    };
+  }
+
+  // Step (c) — nothing to offer.
+  return null;
+}
+
+/** Shared input schema for analyze_image. Both fields optional individually. */
+export const ANALYZE_IMAGE_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    image: {
+      type:        "string",
+      description: "Path / URL / data-URL for a single image. Mutually compatible with `images`.",
+    },
+    images: {
+      type:        "array",
+      items:       { type: "string" },
+      description: "List of paths / URLs / data-URLs (up to 20).",
+    },
+    prompt: {
+      type:        "string",
+      description: "Question or instruction for the vision model. Default: \"Describe the image.\"",
+    },
+  },
+};
+
+/** Holds the resolved gating result so the executor can dispatch with it. */
+let activeImageTool: GatedImageTool | null = null;
+
+export function setActiveImageTool(g: GatedImageTool | null): void {
+  activeImageTool = g;
+}
+
+export function getActiveImageTool(): GatedImageTool | null {
+  return activeImageTool;
+}
