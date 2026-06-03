@@ -1,6 +1,6 @@
-# NexusCode
+# NexusClaw
 
-A production-shaped CLI coding agent. Provider-agnostic across Anthropic and OpenAI, with a single-loop control core, multi-tier context compression, speculative tool execution, sub-agents, MCP, and a permission system designed for use in real engineering workflows — not a toy demo.
+A production-shaped AI assistant. This is a general-purpose daily-life assistant — desktop tasks, news, image and document analysis, chat-platform remote control. Provider-agnostic across Anthropic and OpenAI, with a single-loop control core, multi-tier context compression, speculative tool execution, sub-agents, MCP, a permission system, and a media stream that survives the trip across chat platforms. Binary name: `nexusclaw`.
 
 ---
 
@@ -14,7 +14,7 @@ A production-shaped CLI coding agent. Provider-agnostic across Anthropic and Ope
 | CLI | **`commander`** | Argument parsing, subcommands, help text |
 | Schema | **`zod`** | Runtime validation at tool boundaries |
 | Style | **`chalk`** | TTY-aware terminal styling |
-| Tests | **`bun:test`** | 26 suites, 400+ tests, no external test framework |
+| Tests | **`bun:test`** | 51 suites, 850+ tests, no external test framework |
 | External tools | **MCP** (Model Context Protocol) over stdio + JSON-RPC 2.0 | Standard interop with third-party tool servers |
 
 No build step, no bundler, no transpiler. `bun run src/index.ts` is the entry point.
@@ -23,10 +23,10 @@ No build step, no bundler, no transpiler. `bun run src/index.ts` is the entry po
 
 ## Architecture at a Glance
 
-The agent is a **single class driving a single `while(true)` loop** (`src/core/agent.ts:524`). One iteration = one API round-trip + zero-or-more tool executions. Every behavior — streaming, retries, compression, sub-agents, plan mode, permissions — is layered onto that loop, not bolted on as parallel state machines.
+The agent is a **single class driving a single `while(true)` loop** (`src/core/agent.ts`, around `runTurn`). One iteration = one API round-trip + zero-or-more tool executions. Every behavior — streaming, retries, compression, sub-agents, plan mode, permissions — is layered onto that loop, not bolted on as parallel state machines.
 
 ```
-chat(userMessage)
+chat(userMessage)                    # string OR content[] (text + inline image blocks)
   └─ runTurn()
        ├─ start memory prefetch  (non-blocking side query)
        └─ loop:
@@ -54,11 +54,11 @@ A single `Provider` interface (`src/core/provider.ts`) hides Anthropic vs. OpenA
 
 ### 2. Streaming-time speculative tool execution
 
-When a tool_use block arrives during streaming, if the tool is in `CONCURRENCY_SAFE_TOOLS` *and* passes `checkPermission()`, it starts executing **before the model finishes its response** (`src/core/agent.ts:585-595`). Results are awaited at dispatch time. This shaves real wall-clock latency on read-heavy turns without speculating on risky operations.
+When a tool_use block arrives during streaming, if the tool is in `CONCURRENCY_SAFE_TOOLS` *and* passes `checkPermission()`, it starts executing **before the model finishes its response** (the `onToolUse` callback inside `runTurn`). Results are awaited at dispatch time. This shaves real wall-clock latency on read-heavy turns without speculating on risky operations.
 
 ### 3. Parallel tool batching with permission gates
 
-`handleNextTurn` groups consecutive concurrency-safe + allowed tool blocks into parallel `Promise.all` batches (`src/core/agent.ts:716-727`); non-safe tools fall back to serial execution through `checkPermission` with ask / deny / confirm-dangerous paths. Maximum parallelism, zero correctness regression.
+`handleNextTurn` groups consecutive concurrency-safe + allowed tool blocks into parallel `Promise.all` batches; non-safe tools fall back to serial execution through `checkPermission` with ask / deny / confirm-dangerous paths. Maximum parallelism, zero correctness regression.
 
 ### 4. Three-tier context compression
 
@@ -92,7 +92,15 @@ Full stdio + JSON-RPC 2.0 client in `src/core/mcp.ts`: spawns external tool serv
 
 Per-project memory directory with frontmatter-typed entries (user / feedback / project / reference). On each turn, a **lightweight side-query LLM call** runs in parallel with the main API call to pick relevant memories (`startMemoryPrefetch`, `src/core/memory.ts:418`). Results are injected only if they arrive in time — never blocks the critical path. Already-surfaced memories are tracked to prevent re-injection.
 
-### 10. Recovery semantics
+### 10. Multimodal tools — analyze_image and analyze_pdf
+
+Two first-class tools that route to provider-specific vision/document models behind a uniform interface. `analyze_image` accepts paths, URLs, data URIs, or `media://inbound/<id>` references — resolves each through path classification, sandbox rewrite, and the shared MediaStorage — and dispatches single / batch / loop calls depending on what the provider supports. `analyze_pdf` mirrors the same shape, with a native-PDF fast path when the provider supports it and an extract-then-describe fallback for page-range queries. Provider registration happens in `src/tools/{image,pdf}-models.ts` so plugging in a new vision model is one entry, not a fork.
+
+### 11. Cross-platform media stream
+
+A symmetric two-way pipeline staged on disk at `~/.nexusclaw/media/{inbound,outbound}` with sanitized-name + UUID filenames and an opportunistic 2-minute TTL sweep that runs on every write — no background timers. Inbound: the platform adapter downloads attachments and produces `IngestedMedia`; the shared `buildInboundShape` decides between an inline image content block (small) and a `[media attached: media://inbound/<id>]` marker (everything else). Outbound: agents emit URLs, paths, or buffers; the router normalizes into `{ kind: "url" | "file" }`, and the platform plugin uploads file-kind items as multipart and picks the API method by content type + role hint (Telegram: sendPhoto / sendAnimation / sendVideo / sendVideoNote / sendVoice / sendAudio / sendDocument / sendSticker). The generic surface lives in `src/remote/{media-storage,inbound-media,outbound-media}.ts`; only the multipart dispatch is platform-specific.
+
+### 12. Recovery semantics
 
 | Failure | Strategy |
 |---|---|
@@ -123,7 +131,7 @@ Five orthogonal modes (`default`, `plan`, `acceptEdits`, `dontAsk`, `bypassPermi
 
 ### Large tool results spill to disk with previews
 
-Tool results larger than 30 KB are written to `~/.mini-claude/tool-results/<timestamp>-<tool>.txt` and replaced inline with a 200-line preview + the on-disk path (`persistLargeResult`, `src/core/agent.ts:831`). The model can re-`read_file` the full result if it needs more.
+Tool results larger than 30 KB are written to `~/.mini-claude/tool-results/<timestamp>-<tool>.txt` and replaced inline with a 200-line preview + the on-disk path (`persistLargeResult` in `src/core/agent.ts`). The model can re-`read_file` the full result if it needs more.
 
 **Why it matters:** a single 5 MB grep result will otherwise blow the context window in one turn. This design treats the conversation as a working set, with cold storage one tool call away — the same pattern you'd use for paging in a database engine.
 
@@ -135,7 +143,7 @@ Tool results larger than 30 KB are written to `~/.mini-claude/tool-results/<time
 
 ### Session persistence with explicit `--resume`
 
-Top-level agents auto-save after each turn (`autoSave`, `src/core/agent.ts:243`); sub-agents do not (`src/core/agent.ts:435`). Sessions are addressable by ID and resumable via the CLI. The `isSubAgent` flag is the only thing gating this — no accidental save spam from delegation.
+Top-level agents auto-save after each turn (`autoSave` in `src/core/agent.ts`); sub-agents do not (gated by the `isSubAgent` flag). Sessions are addressable by ID and resumable via the CLI. The `isSubAgent` flag is the only thing gating this — no accidental save spam from delegation.
 
 **Why it matters:** users expect Ctrl-C to be safe and "open it again tomorrow" to just work. Sub-agents creating dozens of phantom sessions is a real bug to design around.
 
@@ -668,6 +676,12 @@ bun run src/index.ts --resume
 
 # With cost cap
 bun run src/index.ts --max-cost 0.50 --max-turns 20
+
+# Run as a remote-controlled bot (Telegram today; configure via ~/.nexusclaw/nexusclaw.json)
+bun run src/index.ts serve
+
+# Approve a pending pairing request from the host
+bun run src/index.ts pairing approve telegram <code>
 ```
 
 Set `ANTHROPIC_API_KEY` (default) or `OPENAI_API_KEY` + `--api-base` for OpenAI-compatible endpoints.
@@ -682,9 +696,11 @@ src/
 ├── cli/
 │   ├── commands.ts             # commander definitions
 │   ├── repl.ts                 # interactive loop
+│   ├── serve.ts                # `serve` mode — drives the agent from chat platforms
+│   ├── pairing.ts              # host-side pairing approval CLI
 │   └── ui.ts                   # terminal rendering
 ├── core/
-│   ├── agent.ts                # the single-loop core (1100+ LOC, fully typed)
+│   ├── agent.ts                # the single-loop core (1200+ LOC, fully typed)
 │   ├── provider.ts             # vendor-agnostic interface
 │   ├── providers/{anthropic,openai}.ts
 │   ├── memory.ts               # per-project memory with async injection
@@ -695,11 +711,44 @@ src/
 │   ├── prompt.ts               # CLAUDE.md + rules + context assembly
 │   ├── retry.ts                # exponential backoff with abort
 │   └── types.ts                # shared SDK / agent types
+├── remote/                     # platform-agnostic remote-control layer
+│   ├── gateway.ts              # adapter ⇄ agent dispatcher (per-user FIFO, sink swap)
+│   ├── router.ts               # outbound payload → platform adapter
+│   ├── coordinator.ts          # streaming preview vs. delivery pipelines
+│   ├── queue.ts                # per-identity FIFO with parallel keys
+│   ├── sequentializer.ts       # single-lane FIFO primitive
+│   ├── media-storage.ts        # ~/.nexusclaw/media/{inbound,outbound} + TTL sweep
+│   ├── inbound-media.ts        # platform-neutral inbound shape (text + image blocks)
+│   ├── outbound-media.ts       # platform-neutral outbound normalizer (url / path / buffer)
+│   ├── settings.ts             # ~/.nexusclaw/nexusclaw.json reader
+│   ├── pairing.ts              # ~/.nexusclaw/pairing.json store + watcher
+│   ├── types.ts                # RemoteEvent / RemoteIdentity / OutboundPayload / …
+│   └── adapters/               # one file per platform plugin
+│       ├── telegram.ts         # PlatformAdapter for Telegram (grammY)
+│       ├── telegram-media.ts   # inbound media download + ingest
+│       ├── telegram-media-send.ts  # outbound multipart upload + MIME dispatch
+│       ├── telegram-flood.ts   # debounce + rate-limit + abuse counter
+│       ├── telegram-access.ts  # group / DM access policy
+│       ├── telegram-dm.ts      # DM pairing flow
+│       ├── telegram-html.ts    # markdown → Telegram HTML chunker
+│       └── telegram-verbose.ts # raw-update logger
 └── tools/
     ├── definitions.ts          # JSON schemas + activation gating
     ├── executor.ts             # dispatch
     ├── dangerous.ts            # permission rules + danger patterns
+    ├── image-provider.ts       # vision-model interface (analyze_image)
+    ├── image-models.ts         # built-in image-model registrations
+    ├── pdf-provider.ts         # PDF-model interface (native + extracted paths)
+    ├── pdf-models.ts           # built-in PDF-model registrations
     └── handlers/               # one file per tool
+        ├── analyze_image.ts    # describe images via the configured vision model
+        ├── analyze_pdf.ts      # native or extract-then-describe PDF path
+        ├── edit_file.ts        # patch / rewrite a file
+        ├── file_ops.ts         # create / move / delete
+        ├── grep_search.ts
+        ├── list_files.ts
+        ├── run_shell.ts
+        └── web_fetch.ts
 ```
 
 ---
@@ -710,4 +759,4 @@ src/
 bun test
 ```
 
-26 test files. Coverage includes: streaming delta accumulation, parallel tool batching, permission rule matching, compression tiers, sub-agent isolation, MCP lifecycle, memory CRUD + index sync, plan mode transitions, and provider format translation.
+51 test files, 850+ tests. Coverage includes: streaming delta accumulation, parallel tool batching, permission rule matching, compression tiers, sub-agent isolation, MCP lifecycle, memory CRUD + index sync, plan mode transitions, provider format translation, the remote-control layer (gateway routing, FloodGuard, Telegram inbound/outbound denormalization), the cross-platform media stream (storage TTL, inbound shape builder, outbound normalizer, multipart dispatch), and the analyze_image / analyze_pdf tools.
