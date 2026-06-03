@@ -139,11 +139,20 @@ export interface OutboundPayload {
   /**
    * Single attachment source — convenience for the common one-media case.
    * Normalized into `mediaUrls` by the shared helper before the adapter
-   * sees it.
+   * sees it. Legacy: prefer `media` below.
    */
   mediaUrl?: string;
-  /** Multiple attachment sources, in display order. */
+  /** Multiple attachment URL sources, in display order. Legacy: prefer `media`. */
   mediaUrls?: ReadonlyArray<string>;
+  /**
+   * Generic media attachments. Each entry can be a URL, a local path, a
+   * buffer, or a bare string (auto-classified). The router normalizes them
+   * into a uniform shape before handing off to the adapter, so platform
+   * plugins only deal with `{ kind: "url" }` or `{ kind: "file" }`.
+   *
+   * See `OutboundMediaInput` in `@/remote/outbound-media`.
+   */
+  media?: ReadonlyArray<import("@/remote/outbound-media").OutboundMediaInput>;
   /**
    * Force images to be sent as documents (uncompressed). Affects how
    * adapters route to sendPhoto vs sendDocument; ignored by platforms

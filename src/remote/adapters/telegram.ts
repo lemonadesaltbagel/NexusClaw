@@ -54,6 +54,15 @@ import {
   getDefaultMediaStorage,
   type MediaStorage,
 } from "@/remote/media-storage";
+import { getNormalizedMedia } from "@/remote/router";
+import {
+  sendOneTelegramMedia,
+  type TelegramApiSurface,
+} from "@/remote/adapters/telegram-media-send";
+import {
+  normalizeOutboundMedia,
+  type OutboundMediaInput,
+} from "@/remote/outbound-media";
 
 // ---------------------------------------------------------------------------
 // Limits + tunables
@@ -635,10 +644,29 @@ export class TelegramAdapter implements PlatformAdapter {
       );
     }
 
-    // 4. Media-first path: iterate mediaUrls; the first item carries the
-    //    body as caption + the keyboard, subsequent items are media-only.
-    //    forceDocument routes to sendDocument instead of sendPhoto.
-    if (mediaUrls.length > 0) {
+    // 4. Media-first path. When the router pre-normalized media into the
+    //    generic `OutboundMedia` shape, we dispatch through the role/MIME
+    //    picker and InputFile-wrap any file-kind items so the upload goes
+    //    out as multipart. Callers that hit `sendPayload` directly (without
+    //    routing through OutboundRouter) get the same treatment via an
+    //    in-place normalization of `payload.media` / `mediaUrls` / `mediaUrl`.
+    const preNormalized = getNormalizedMedia(payload);
+    let mediaItems: ReadonlyArray<{
+      kind: "url" | "file";
+      [k: string]: unknown;
+    }> = [];
+    if (preNormalized && preNormalized.length > 0) {
+      mediaItems = preNormalized;
+    } else {
+      const legacy: OutboundMediaInput[] = [];
+      if (payload.mediaUrls) for (const u of payload.mediaUrls) legacy.push(u);
+      if (payload.mediaUrl)  legacy.push(payload.mediaUrl);
+      if (payload.media)     for (const m of payload.media) legacy.push(m);
+      if (legacy.length > 0) {
+        mediaItems = normalizeOutboundMedia(legacy, { storage: this.mediaStorage });
+      }
+    }
+    if (mediaItems.length > 0) {
       // Caption can be up to 1024 chars in Telegram. Use the first chunk if
       // it fits; otherwise no caption (the long-text case is rare for media
       // replies and is a known gap).
@@ -646,25 +674,27 @@ export class TelegramAdapter implements PlatformAdapter {
         ? chunks[0].htmlText
         : undefined;
       let firstMessageId: number | undefined;
-      const useDocument = !!payload.forceDocument;
-      for (let i = 0; i < mediaUrls.length; i++) {
+      for (let i = 0; i < mediaItems.length; i++) {
         const isFirst = i === 0;
-        const opts: Record<string, unknown> = {};
-        if (isFirst && caption) {
-          opts.caption    = caption;
-          opts.parse_mode = "HTML";
-        }
-        if (messageThreadId !== undefined) opts.message_thread_id = messageThreadId;
-        if (payload.silent)                opts.disable_notification = true;
-        if (isFirst && replyMarkup)        opts.reply_markup        = replyMarkup;
-        if (isFirst && replyParameters)    opts.reply_parameters    = replyParameters;
+        const extraOpts: Record<string, unknown> = {};
+        if (messageThreadId !== undefined) extraOpts.message_thread_id = messageThreadId;
+        if (payload.silent)                extraOpts.disable_notification = true;
+        if (isFirst && replyMarkup)        extraOpts.reply_markup        = replyMarkup;
+        if (isFirst && replyParameters)    extraOpts.reply_parameters    = replyParameters;
         if (isFirst && replyToMessageId !== undefined && !replyParameters) {
-          opts.reply_to_message_id = replyToMessageId;
+          extraOpts.reply_to_message_id = replyToMessageId;
         }
-        const m = useDocument
-          ? await this.bot.api.sendDocument(target.to, mediaUrls[i]!, opts as never)
-          : await this.bot.api.sendPhoto(target.to, mediaUrls[i]!, opts as never);
-        if (isFirst) firstMessageId = m.message_id;
+        const { messageId } = await sendOneTelegramMedia(
+          this.bot.api as unknown as TelegramApiSurface,
+          target.to,
+          mediaItems[i]! as never,
+          {
+            forceDocument: !!payload.forceDocument,
+            ...(isFirst && caption ? { caption } : {}),
+            extraOpts,
+          },
+        );
+        if (isFirst) firstMessageId = messageId;
       }
       return { messageId: firstMessageId };
     }

@@ -1,5 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import { OutboundRouter } from "@/remote/router";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { OutboundRouter, getNormalizedMedia } from "@/remote/router";
+import { MediaStorage } from "@/remote/media-storage";
 import type {
   OutboundPayload,
   OutboundTarget,
@@ -73,5 +77,58 @@ describe("OutboundRouter", () => {
     };
     await r.send(target, payload);
     expect(tg.calls[0]).toEqual({ target, payload });
+  });
+
+  describe("media normalization", () => {
+    test("text-only payloads skip the normalizer (no normalized media attached)", async () => {
+      const tg = new StubAdapter("telegram");
+      const r = new OutboundRouter([tg]);
+      await r.send({ channel: "telegram", to: "1" }, { text: "hi" });
+      expect(getNormalizedMedia(tg.calls[0]!.payload)).toBeUndefined();
+    });
+
+    test("legacy mediaUrls become normalized URL entries the adapter can read", async () => {
+      const tg = new StubAdapter("telegram");
+      const r = new OutboundRouter([tg]);
+      await r.send(
+        { channel: "telegram", to: "1" },
+        { text: "", mediaUrls: ["https://x/a.png", "https://x/b.png"] },
+      );
+      const m = getNormalizedMedia(tg.calls[0]!.payload);
+      expect(m).toEqual([
+        { kind: "url", url: "https://x/a.png", role: "auto", contentType: "image/png" },
+        { kind: "url", url: "https://x/b.png", role: "auto", contentType: "image/png" },
+      ]);
+    });
+
+    test("the new media field saves buffers and paths into media/outbound/", async () => {
+      const root = mkdtempSync(join(tmpdir(), "nx-router-media-"));
+      const storage = new MediaStorage({ root });
+      const tg = new StubAdapter("telegram");
+      const r = new OutboundRouter([tg], { mediaStorage: storage });
+
+      const srcDir = mkdtempSync(join(tmpdir(), "nx-src-"));
+      const src = join(srcDir, "thing.pdf");
+      writeFileSync(src, Buffer.from([0x25, 0x50, 0x44, 0x46])); // %PDF
+
+      await r.send(
+        { channel: "telegram", to: "1" },
+        {
+          text: "",
+          media: [
+            { kind: "url", url: "https://x/a.gif", role: "animation" },
+            { kind: "buffer", data: Buffer.from("hi"), contentType: "image/png", fileName: "out.png" },
+            { kind: "path", path: src, contentType: "application/pdf", role: "document" },
+          ],
+        },
+      );
+
+      const m = getNormalizedMedia(tg.calls[0]!.payload);
+      expect(m).toHaveLength(3);
+      expect(m![0]).toEqual({ kind: "url", url: "https://x/a.gif", role: "animation" });
+      expect(m![1]).toMatchObject({ kind: "file", contentType: "image/png", role: "auto" });
+      expect((m![1] as { path: string }).path).toContain("/outbound/");
+      expect(m![2]).toMatchObject({ kind: "file", contentType: "application/pdf", role: "document" });
+    });
   });
 });

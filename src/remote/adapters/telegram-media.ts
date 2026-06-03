@@ -172,17 +172,12 @@ export async function fetchTelegramFile(
 
 // ---------------------------------------------------------------------------
 // Ingest — download + save + classify size. The adapter uses this once per
-// media-bearing message; the returned `SavedMedia` plus the inline-eligible
-// flag drives the inline-vs-marker decision.
+// media-bearing message; the returned `IngestedMedia` (from the shared
+// inbound-media module) plus the inline-eligible flag drives the
+// inline-vs-marker decision built by `buildInboundShape`.
 // ---------------------------------------------------------------------------
 
-export interface IngestedMedia {
-  saved:           SavedMedia;
-  /** True when the file is small enough to embed directly in the agent message. */
-  inlineEligible:  boolean;
-  /** Raw bytes — only kept when inlineEligible is true; null otherwise to save heap. */
-  inlineBytes:     Buffer | null;
-}
+import type { IngestedMedia } from "@/remote/inbound-media";
 
 export interface IngestOptions {
   token:    string;
@@ -211,65 +206,6 @@ export async function ingestTelegramMedia(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Inbound-content builder — turns one piece of user text and zero-or-more
-// ingested media items into the final shape the gateway forwards to the
-// agent. Small enough to inline → text + image blocks. Anything else → a
-// marker line appended to the text.
-// ---------------------------------------------------------------------------
-
-import type { InboundContent } from "@/remote/types";
-
-export interface InboundShape {
-  text:    string;
-  content: ReadonlyArray<InboundContent>;
-}
-
-/**
- * Compose the final inbound content. Rules:
- *   • Inline-eligible image media → an `image` content block alongside text.
- *   • Anything else (oversize, non-image kinds) → a marker line appended
- *     to the text. The agent uses the image/pdf tool to fetch it later.
- *   • Text-only inbound → returns plain text with an empty content array.
- *
- * Returned `text` is always the marker-suffixed string for logging / fallback;
- * `content` is the array passed to the agent when non-empty.
- */
-export function buildInboundShape(
-  userText:  string,
-  media:     ReadonlyArray<IngestedMedia>,
-): InboundShape {
-  const markers: string[] = [];
-  const blocks:  InboundContent[] = [];
-
-  for (const m of media) {
-    const canInline = m.inlineEligible
-      && m.inlineBytes !== null
-      && m.saved.mimeType.startsWith("image/");
-    if (canInline) {
-      blocks.push({
-        type:     "image",
-        data:     m.inlineBytes!.toString("base64"),
-        mimeType: m.saved.mimeType,
-      });
-    } else {
-      markers.push(`[media attached: ${m.saved.uri}]`);
-    }
-  }
-
-  const trimmed   = userText.trim();
-  const markerStr = markers.join("\n");
-  const finalText = trimmed && markerStr
-    ? `${trimmed}\n${markerStr}`
-    : trimmed || markerStr;
-
-  // When there are inline image blocks, the text block goes first so the
-  // model reads context before looking at the picture.
-  if (blocks.length > 0) {
-    const out: InboundContent[] = [];
-    if (finalText) out.push({ type: "text", text: finalText });
-    for (const b of blocks) out.push(b);
-    return { text: finalText, content: out };
-  }
-  return { text: finalText, content: [] };
-}
+// Re-export the shared shape + builder so the existing adapter imports
+// keep working without churn.
+export { buildInboundShape, type IngestedMedia, type InboundShape } from "@/remote/inbound-media";
