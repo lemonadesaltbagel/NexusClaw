@@ -19,12 +19,45 @@ import { getSkillByName, resolveSkillPrompt } from "@/core/skills";
 import { IdentityQueue } from "@/remote/queue";
 import {
   identityKey,
+  type InboundContent,
   type PlatformAdapter,
   type RemoteEvent,
   type RemoteIdentity,
   type RemoteOutput,
   type RemotePromptReply,
 } from "@/remote/types";
+
+// Anthropic's Base64ImageSource.media_type is a literal union of the four
+// supported image types. Anything else gets degraded to a text block so the
+// model still knows the attachment exists without choking the provider.
+type AnthropicImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+const SUPPORTED_IMAGE_TYPES = new Set<AnthropicImageMediaType>([
+  "image/jpeg", "image/png", "image/gif", "image/webp",
+]);
+
+// Adapter for InboundContent → Anthropic-shaped content block. The Agent's
+// provider layer handles cross-vendor translation downstream; here we just
+// reshape image blocks into the SDK's `source: { type: "base64", … }` form.
+function toAnthropicBlock(c: InboundContent):
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      source: { type: "base64"; media_type: AnthropicImageMediaType; data: string };
+    } {
+  if (c.type === "text") return { type: "text", text: c.text };
+  if (SUPPORTED_IMAGE_TYPES.has(c.mimeType as AnthropicImageMediaType)) {
+    return {
+      type: "image",
+      source: {
+        type:       "base64",
+        media_type: c.mimeType as AnthropicImageMediaType,
+        data:       c.data,
+      },
+    };
+  }
+  return { type: "text", text: `[image attachment of unsupported type ${c.mimeType}]` };
+}
 
 // ---------------------------------------------------------------------------
 // AgentCallbacks — the subset of AgentOptions the Gateway controls.
@@ -134,7 +167,13 @@ export class Gateway {
 
   private async dispatch(binding: UserBinding, e: RemoteEvent): Promise<void> {
     if (e.kind === "message") {
-      await binding.agent.chat(e.text, e.signal ? { signal: e.signal } : undefined);
+      // Prefer the rich content array (inline media + text) when the
+      // adapter supplied one; otherwise hand off the plain text. Both
+      // shapes resolve to `messages.push({ role: "user", content })`.
+      const input = e.content && e.content.length > 0
+        ? (e.content as ReadonlyArray<InboundContent>).map(toAnthropicBlock)
+        : e.text;
+      await binding.agent.chat(input, e.signal ? { signal: e.signal } : undefined);
       return;
     }
     if (e.kind === "command") {

@@ -425,8 +425,18 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
     return `Unknown plan mode tool: ${name}`;
   }
 
-  /** High-level entry point: runs one full turn with abort support. */
-  async chat(userMessage: string, opts?: { signal?: AbortSignal }): Promise<QueryResult> {
+  /**
+   * High-level entry point: runs one full turn with abort support.
+   *
+   * `userMessage` accepts either a plain string or a content-block array
+   * (text + image blocks) so adapters can pass inline media without going
+   * through a tool call. The runTurn loop is the same either way — the
+   * value flows straight onto `messages.push({ role: "user", content })`.
+   */
+  async chat(
+    userMessage: string | MessageParam["content"],
+    opts?: { signal?: AbortSignal },
+  ): Promise<QueryResult> {
     this.abortController = new AbortController();
     let onExternalAbort: (() => void) | undefined;
     if (opts?.signal) {
@@ -533,8 +543,21 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
   // Provider-agnostic: delegates streaming to this.provider.
   // -----------------------------------------------------------------------
 
-  private async runTurn(userMessage: string): Promise<QueryResult> {
+  private async runTurn(
+    userMessage: string | MessageParam["content"],
+  ): Promise<QueryResult> {
     this.messages.push({ role: "user", content: userMessage });
+
+    // The side-query needs plain text. When the caller hands us content
+    // blocks (e.g. inline media), concatenate just the text parts so the
+    // memory prefetch still has something to embed.
+    const queryText =
+      typeof userMessage === "string"
+        ? userMessage
+        : userMessage
+            .filter((b): b is { type: "text"; text: string } => (b as { type?: string }).type === "text")
+            .map((b) => b.text)
+            .join("\n");
 
     // Start memory prefetch (non-blocking, runs in parallel with API call)
     let memoryPrefetch: MemoryPrefetch | null = null;
@@ -542,7 +565,7 @@ Do NOT ask the user to approve — exit_plan_mode handles that.`;
       const sq = this.buildSideQuery();
       if (sq) {
         memoryPrefetch = startMemoryPrefetch(
-          userMessage, sq,
+          queryText, sq,
           this.alreadySurfacedMemories, this.sessionMemoryBytes,
           this.abortController?.signal,
         );

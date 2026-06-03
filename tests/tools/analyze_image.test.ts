@@ -56,6 +56,8 @@ describe("classifyImage", () => {
     ["just-a-filename.png",            "relative-path"],
     ["image:0",                        "pseudo-uri"],
     ["blob:something",                 "pseudo-uri"],
+    ["media://inbound/x.png",          "media-uri"],
+    ["media://outbound/y.jpg",         "media-uri"],
   ];
   for (const [input, expected] of cases) {
     test(`"${input}" → ${expected}`, () => {
@@ -128,6 +130,23 @@ describe("resolveOne", () => {
     });
     expect(out.resolved).toBe(target);
     expect(out.rewrittenFrom).toBe(original);
+  });
+
+  test("media:// URI reads bytes from MediaStorage", async () => {
+    const { MediaStorage } = await import("@/remote/media-storage");
+    const storage = new MediaStorage({ root: tmpDir });
+    const saved = storage.save("inbound", "pic.png", "png", Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const out = await resolveOne(saved.uri, { workspaceDir: tmpDir, mediaStorage: storage });
+    expect(out.ref.kind).toBe("base64");
+    expect(out.resolved).toBe(saved.path);
+  });
+
+  test("media:// URI surfaces a clear error when the id is unknown", async () => {
+    const { MediaStorage } = await import("@/remote/media-storage");
+    const storage = new MediaStorage({ root: tmpDir });
+    await expect(
+      resolveOne("media://inbound/ghost.png", { workspaceDir: tmpDir, mediaStorage: storage }),
+    ).rejects.toThrow(/media URI not found/);
   });
 });
 

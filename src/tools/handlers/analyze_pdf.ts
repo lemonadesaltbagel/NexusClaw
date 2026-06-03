@@ -25,6 +25,10 @@ import {
   resolveUserPath,
   assembleCandidates,
 } from "@/tools/handlers/analyze_image";
+import {
+  getDefaultMediaStorage,
+  type MediaStorage,
+} from "@/remote/media-storage";
 import type {
   PdfProvider,
   PdfRef,
@@ -87,6 +91,7 @@ export interface ResolvedPdf {
 export interface ResolvePdfContext {
   workspaceDir:    string;
   sandboxRewrite?: (path: string) => string | undefined;
+  mediaStorage?:   MediaStorage;
 }
 
 export async function resolvePdfOne(
@@ -116,8 +121,14 @@ export async function resolvePdfOne(
   }
 
   let path = raw;
-  if (kind === "file-url")     path = raw.replace(/^file:\/{2,3}/i, "/");
-  else if (kind === "home-path") path = resolveUserPath(raw);
+  if (kind === "file-url")           path = raw.replace(/^file:\/{2,3}/i, "/");
+  else if (kind === "media-uri") {
+    const storage = ctx.mediaStorage ?? getDefaultMediaStorage();
+    const resolved = storage.resolveUri(raw);
+    if (!resolved) throw new Error(`media URI not found on disk: ${raw}`);
+    path = resolved;
+  }
+  else if (kind === "home-path")     path = resolveUserPath(raw);
   else if (kind === "relative-path") path = resolvePath(ctx.workspaceDir, raw);
   // windows-path / absolute-path: use as-is
   else if (kind !== "windows-path" && kind !== "absolute-path") {
@@ -157,6 +168,7 @@ export interface AnalyzePdfContext {
   extractor:    PdfExtractor | null;
   workspaceDir: string;
   sandboxRewrite?: (path: string) => string | undefined;
+  mediaStorage?:   MediaStorage;
 }
 
 export async function analyzePdf(
@@ -177,6 +189,7 @@ export async function analyzePdf(
       resolved.push(await resolvePdfOne(c, {
         workspaceDir:   ctx.workspaceDir,
         sandboxRewrite: ctx.sandboxRewrite,
+        mediaStorage:   ctx.mediaStorage,
       }));
     } catch (err: unknown) {
       return {

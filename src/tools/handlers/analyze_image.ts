@@ -28,6 +28,11 @@ import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { resolve as resolvePath, isAbsolute } from "node:path";
 import type { ImageProvider, ImageRef, DescribeResult } from "@/tools/image-provider";
+import {
+  getDefaultMediaStorage,
+  MEDIA_URI_PREFIX,
+  type MediaStorage,
+} from "@/remote/media-storage";
 
 const readFileAsync = promisify(readFile);
 
@@ -88,6 +93,7 @@ export type ImageKind =
   | "data-url"
   | "file-url"
   | "http-url"
+  | "media-uri"
   | "windows-path"
   | "home-path"
   | "absolute-path"
@@ -99,14 +105,16 @@ export function classifyImage(raw: string): ImageKind {
   const isFileUrl   = /^file:/i.test(raw);
   const isHttpUrl   = /^https?:\/\//i.test(raw);
   const isDataUrl   = /^data:/i.test(raw);
+  const isMediaUri  = raw.startsWith(MEDIA_URI_PREFIX);
   const hasScheme   = /^[a-z][a-z0-9+.-]*:/i.test(raw);
 
   if (isDataUrl)              return "data-url";
   if (isFileUrl)              return "file-url";
   if (isHttpUrl)              return "http-url";
+  if (isMediaUri)             return "media-uri";
   if (looksLikeWindowsDrivePath) return "windows-path";
   if (raw.startsWith("~"))    return "home-path";
-  // A scheme that's not file://, http://, or data: is an agent-side
+  // A scheme that's not file://, http://, data:, or media: is an agent-side
   // pseudo-URI (e.g. "image:0", "blob:…"). Hand it back to the caller
   // unchanged — otherwise fs.readFile("image:0") would emit ENOENT.
   if (hasScheme)              return "pseudo-uri";
@@ -122,6 +130,8 @@ export interface ResolveContext {
   workspaceDir: string;
   /** Optional sandbox rewrite (records the mapping in details if used). */
   sandboxRewrite?: (path: string) => string | undefined;
+  /** Override the on-disk media store. Defaults to the singleton. */
+  mediaStorage?: MediaStorage;
 }
 
 export interface ResolvedImage {
@@ -185,6 +195,16 @@ export async function resolveOne(
     // pass it through as a URL ref so the model gets the raw string and
     // can ignore / hallucinate-around it.
     return { ref: { kind: "url", url: raw }, original: raw, resolved: raw };
+  }
+
+  if (kind === "media-uri") {
+    // media://inbound/<id> — resolve to a real path via MediaStorage. We
+    // record the disk path as `resolved` so `details.images` shows where
+    // the file actually lived, while `original` keeps the URI for trace.
+    const storage = ctx.mediaStorage ?? getDefaultMediaStorage();
+    const path = storage.resolveUri(raw);
+    if (!path) throw new Error(`media URI not found on disk: ${raw}`);
+    return await readAsBase64(raw, path);
   }
 
   // Filesystem paths from here on.
@@ -257,6 +277,7 @@ export interface AnalyzeImageContext {
   provider:    ImageProvider | null;
   workspaceDir: string;
   sandboxRewrite?: (path: string) => string | undefined;
+  mediaStorage?: MediaStorage;
 }
 
 export async function analyzeImage(
@@ -275,6 +296,7 @@ export async function analyzeImage(
       resolved.push(await resolveOne(c, {
         workspaceDir:    ctx.workspaceDir,
         sandboxRewrite:  ctx.sandboxRewrite,
+        mediaStorage:    ctx.mediaStorage,
       }));
     } catch (err: unknown) {
       return {

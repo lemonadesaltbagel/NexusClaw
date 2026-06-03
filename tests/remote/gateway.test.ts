@@ -60,6 +60,8 @@ class FakeAgent {
   isProcessing = false;
   aborted = false;
   history: string[] = [];
+  /** Raw inputs to chat — preserves the actual shape (string or content array). */
+  rawHistory: unknown[] = [];
   planMode = "default";
   compacted = 0;
   costShown = 0;
@@ -72,8 +74,9 @@ class FakeAgent {
     this.planMode = this.planMode === "plan" ? "default" : "plan";
     return this.planMode;
   }
-  async chat(text: string): Promise<unknown> {
-    this.history.push(text);
+  async chat(text: unknown): Promise<unknown> {
+    this.rawHistory.push(text);
+    if (typeof text === "string") this.history.push(text);
     return undefined;
   }
   async compact(): Promise<void> { this.compacted++; }
@@ -167,6 +170,66 @@ describe("Gateway — message routing", () => {
 
     const texts = adapter.sent.filter((s) => s.out.kind === "text").map((s) => (s.out as Extract<RemoteOutput, { kind: "text" }>).delta);
     expect(texts.join("")).toBe("hello world");
+  });
+
+  test("inline media content[] is forwarded to agent.chat as anthropic blocks", async () => {
+    const { factory, agents } = makeFactory();
+    const adapter = new FakeAdapter();
+    const gw = new Gateway({ resolveIdentity: () => "alice", agentFactory: factory });
+    gw.registerAdapter(adapter);
+
+    adapter.fire({
+      kind: "message",
+      from: TG,
+      text: "look at this",
+      content: [
+        { type: "text",  text: "look at this" },
+        { type: "image", data: "QUJD", mimeType: "image/png" },
+      ],
+    });
+    await flush();
+
+    expect(agents[0]!.rawHistory).toHaveLength(1);
+    expect(agents[0]!.rawHistory[0]).toEqual([
+      { type: "text", text: "look at this" },
+      {
+        type:   "image",
+        source: { type: "base64", media_type: "image/png", data: "QUJD" },
+      },
+    ]);
+  });
+
+  test("unsupported image mimeTypes downgrade to a descriptive text block", async () => {
+    const { factory, agents } = makeFactory();
+    const adapter = new FakeAdapter();
+    const gw = new Gateway({ resolveIdentity: () => "alice", agentFactory: factory });
+    gw.registerAdapter(adapter);
+
+    adapter.fire({
+      kind: "message",
+      from: TG,
+      text: "",
+      content: [
+        { type: "image", data: "QUJD", mimeType: "image/heic" },
+      ],
+    });
+    await flush();
+
+    expect(agents[0]!.rawHistory[0]).toEqual([
+      { type: "text", text: "[image attachment of unsupported type image/heic]" },
+    ]);
+  });
+
+  test("message without content[] falls back to the plain text path", async () => {
+    const { factory, agents } = makeFactory();
+    const adapter = new FakeAdapter();
+    const gw = new Gateway({ resolveIdentity: () => "alice", agentFactory: factory });
+    gw.registerAdapter(adapter);
+
+    adapter.fire({ kind: "message", from: TG, text: "just text" });
+    await flush();
+
+    expect(agents[0]!.rawHistory[0]).toBe("just text");
   });
 
   test("same canonical user from two identities reuses one Agent", async () => {

@@ -43,6 +43,17 @@ import {
   type FloodLimits,
   type SyntheticMessage,
 } from "@/remote/adapters/telegram-flood";
+import {
+  buildInboundShape,
+  detectMedia,
+  ingestTelegramMedia,
+  type IngestedMedia,
+  type TelegramMediaSource,
+} from "@/remote/adapters/telegram-media";
+import {
+  getDefaultMediaStorage,
+  type MediaStorage,
+} from "@/remote/media-storage";
 
 // ---------------------------------------------------------------------------
 // Limits + tunables
@@ -419,6 +430,11 @@ export interface TelegramAdapterOptions {
    * memory only). Production callers pass `~/.nexusclaw/flood-state.json`.
    */
   floodStatePath?: string;
+  /**
+   * Override the on-disk media store. Defaults to the process-wide singleton
+   * rooted at `~/.nexusclaw/media`. Tests pass an isolated instance.
+   */
+  mediaStorage?: MediaStorage;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -437,6 +453,8 @@ export class TelegramAdapter implements PlatformAdapter {
   private flood: FloodGuard | null;
   private pendingUpdateIds = new Set<number>();
   private sequentializer = new Sequentializer();
+  private mediaStorage: MediaStorage;
+  private token: string;
   /**
    * Per-sender FIFO of resolve callbacks. Each FloodGuard onFlush pushes one;
    * each outbound `turn_done` pops the oldest and calls it, which lets the
@@ -446,10 +464,12 @@ export class TelegramAdapter implements PlatformAdapter {
 
   constructor(opts: TelegramAdapterOptions) {
     this.bot = new Bot(opts.token);
+    this.token = opts.token;
     this.sender = opts.sender ?? this.defaultSender();
     this.verbose = opts.verbose ?? false;
     this.access = opts.access ?? {};
     this.dm = opts.dm ?? null;
+    this.mediaStorage = opts.mediaStorage ?? getDefaultMediaStorage();
     this.flood = opts.flood === false
       ? null
       : new FloodGuard(
@@ -755,6 +775,56 @@ export class TelegramAdapter implements PlatformAdapter {
   // -------------------------------------------------------------------------
 
   /**
+   * Download a media attachment, save it through MediaStorage, and forward
+   * it to the gateway as a RemoteEvent.message. Runs out-of-band from the
+   * grammY middleware so the long-poll loop isn't blocked on the HTTP fetch.
+   *
+   * Each call triggers a TTL sweep inside MediaStorage.save, so stale files
+   * from prior turns get cleaned up at ingest time — no background timer.
+   */
+  private async dispatchMedia(
+    source: TelegramMediaSource,
+    rawText: string,
+    from:   RemoteIdentity,
+  ): Promise<void> {
+    if (!this.handler) return;
+
+    let ingested: IngestedMedia;
+    try {
+      ingested = await ingestTelegramMedia(source, {
+        token:   this.token,
+        storage: this.mediaStorage,
+        getFile: (id) => this.bot.api.getFile(id) as Promise<{ file_path?: string; file_size?: number }>,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`telegram: media ingest failed for ${source.fileId} — ${msg}`);
+      // Degrade gracefully: if the user attached a caption, still surface
+      // it as a text-only event so their question isn't lost. Pure-media
+      // messages with no caption drop here.
+      const trimmed = rawText.trim();
+      if (trimmed && this.handler) {
+        this.handler({ kind: "message", from, text: trimmed });
+      }
+      return;
+    }
+
+    const shape = buildInboundShape(rawText, [ingested]);
+    console.debug(
+      `telegram: accept media (${source.kind}, ${ingested.saved.size}B) ` +
+      `from ${from.userId} → ${ingested.saved.uri}` +
+      (ingested.inlineEligible ? " [inline]" : " [marker]"),
+    );
+
+    this.handler({
+      kind: "message",
+      from,
+      text: shape.text,
+      ...(shape.content.length > 0 ? { content: shape.content } : {}),
+    });
+  }
+
+  /**
    * Called by the FloodGuard's onFlush. Returns a promise that resolves
    * when the gateway fires `turn_done` for this sender (or rejects if the
    * janitor aborts the per-turn signal). The FloodGuard's dispatchOne
@@ -850,7 +920,7 @@ export class TelegramAdapter implements PlatformAdapter {
       }
     });
 
-    this.bot.on("message", (ctx) => {
+    this.bot.on("message", async (ctx) => {
       if (!ctx.from || !ctx.chat) return;
 
       // Drop self-echoed messages defensively (e.g. multi-bot / forwarded).
@@ -901,19 +971,42 @@ export class TelegramAdapter implements PlatformAdapter {
         }
       }
 
-      // Access granted. Pick up the user's text from either `text` (plain
-      // text message) or `caption` (text attached to a photo/video/document).
-      // The media itself is dropped — agent core does not yet handle it.
-      const text = ctx.message.text ?? ctx.message.caption;
-      if (text === undefined) {
+      // Access granted. Branch on whether the message carries media. Media
+      // and text-only paths share access/rate gates but diverge after: text
+      // goes through the FloodGuard's debounce-and-merge pipeline; media
+      // skips debouncing (each attachment is a distinct intent) and
+      // dispatches once the download completes.
+      const mediaSource = detectMedia(ctx.message);
+      const rawText = ctx.message.text ?? ctx.message.caption ?? "";
+
+      if (mediaSource) {
+        // Rate-only check — pending-cap and debounce don't apply. A user
+        // sending a flurry of photos still gets rate-limited at the
+        // per-minute slot.
+        if (this.flood && !this.flood.tryRateOnly(ctx.from.id).ok) {
+          console.debug(`telegram: rate-limited media from ${ctx.from.id}`);
+          return;
+        }
+        const from: RemoteIdentity = {
+          platform: "telegram",
+          userId: String(ctx.from.id),
+          chatId: String(ctx.chat.id),
+          messageId: ctx.message.message_id,
+          ...(space.kind === "forum" ? { topicId: space.topicId } : {}),
+        };
+        await this.dispatchMedia(mediaSource, rawText, from);
+        return;
+      }
+
+      if (rawText === "") {
         console.debug(
-          `telegram: dropping non-text message from ${ctx.from.id} — no text or caption`,
+          `telegram: dropping non-text message from ${ctx.from.id} — no text, caption, or media`,
         );
         return;
       }
 
       // Resolve /cmd@botname in groups before parsing.
-      const cleaned = stripBotMention(text, ctx.me.username);
+      const cleaned = stripBotMention(rawText, ctx.me.username);
       if (cleaned === null) return;  // command was addressed to another bot
       if (cleaned.trim() === "") {
         console.debug(`telegram: dropping empty message from ${ctx.from.id}`);

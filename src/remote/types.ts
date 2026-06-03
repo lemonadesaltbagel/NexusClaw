@@ -41,11 +41,34 @@ export function identityKey(id: RemoteIdentity): RemoteIdentityKey {
 // Inbound — what an adapter delivers to the Gateway.
 // ---------------------------------------------------------------------------
 
+/**
+ * One block of inbound content the agent receives. `text` is the user's
+ * literal message (possibly suffixed with a `[media attached: …]` marker
+ * for large attachments). `image` is an inline image block — only used
+ * when the source media is small enough to embed directly.
+ */
+export type InboundContent =
+  | { type: "text";  text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export type RemoteEvent =
   | {
       kind: "message";
       from: RemoteIdentity;
+      /**
+       * The user's plain-text message. Always present; for media-only
+       * inbound messages this is "" (empty string), optionally appended
+       * with a media marker line by the adapter.
+       */
       text: string;
+      /**
+       * Full inbound content blocks when the adapter wants to pass media
+       * inline (typically when each attachment is below the inline-size
+       * threshold). When set, the gateway forwards this *instead* of
+       * `text` to `agent.chat`. Adapters that only attach a marker leave
+       * this undefined and let `text` carry the full message.
+       */
+      content?: ReadonlyArray<InboundContent>;
       /**
        * Optional per-turn abort signal. When set, the gateway forwards it
        * to `agent.chat`. The adapter sets this when it owns a per-turn
